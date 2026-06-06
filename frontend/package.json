@@ -1,0 +1,74 @@
+{
+  "name": "frontend",
+  "main": "electron.js",
+  "version": "1.0.0",
+  "description": "Swarna Raseid Professional Gold Billing System",
+  "author": "Swarna Raseid",
+  "homepage": "./",
+  "private": true,
+  "dependencies": {
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^13.5.0",
+    "axios": "^1.15.0",
+    "firebase": "^12.12.1",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "react-scripts": "5.0.1",
+    "serialport": "^13.0.0",
+    "web-vitals": "^2.1.4"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "electron": "^41.2.1",
+    "electron-builder": "^26.8.1",
+    "wait-on": "^9.0.5"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "electron": "node_modules\\.bin\\electron .",
+    "build": "react-scripts build",
+    "dist": "npm run build && electron-builder"
+  },
+  "eslintConfig": {
+    "extends": [
+      "react-app",
+      "react-app/jest"
+    ]
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "build": {
+    "appId": "com.swarnaraseid.billing",
+    "productName": "Swarna Raseid Billing",
+    "extends": null,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "build/**/*",
+      "electron.js",
+      "preload.js",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "public/favicon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
