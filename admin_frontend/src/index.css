@@ -1,0 +1,114 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+:root {
+  --admin-primary: #3498db;
+  --admin-dark: #2c3e50;
+  --bg-gray: #f4f7f6;
+  --border: #e1e8ed;
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', sans-serif;
+  background: var(--bg-gray);
+  color: #333;
+}
+
+/* LOGIN SCREEN */
+.admin-login-overlay {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #1a2a3a;
+}
+
+.admin-login-card {
+  background: white;
+  padding: 40px;
+  border-radius: 12px;
+  width: 100%;
+  max-width: 400px;
+  text-align: center;
+  box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+}
+
+.admin-login-card input {
+  width: 100%; padding: 15px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 8px;
+}
+
+.admin-login-card button {
+  width: 100%; padding: 15px; background: var(--admin-primary); color: white; border: none; border-radius: 8px; font-weight: 700; cursor: pointer;
+}
+
+/* DASHBOARD */
+.admin-dashboard { display: flex; height: 100vh; }
+
+.admin-sidebar {
+  width: 250px; background: var(--admin-dark); color: white; display: flex; flex-direction: column; padding: 30px 0;
+}
+
+.admin-sidebar h2 { padding: 0 25px; margin-bottom: 40px; font-size: 1.2rem; }
+
+.admin-sidebar nav div {
+  padding: 15px 25px; cursor: pointer; color: #bdc3c7; transition: 0.3s;
+}
+
+.admin-sidebar nav div.active {
+  background: rgba(255,255,255,0.05); color: white; border-left: 4px solid var(--admin-primary);
+}
+
+.admin-sidebar .logout { margin-top: auto; background: transparent; color: #e74c3c; border: none; padding: 20px; cursor: pointer; font-weight: 700; }
+
+.admin-content { flex: 1; padding: 50px; overflow-y: auto; }
+
+.admin-content header { margin-bottom: 40px; }
+.admin-content header h1 { margin: 0; font-weight: 700; }
+.admin-content header p { color: #888; font-size: 1rem; }
+
+/* FORMS */
+.card { background: white; padding: 40px; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); }
+
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 30px; }
+
+.input-group label { display: block; margin-bottom: 8px; font-weight: 600; color: #444; font-size: 0.9rem; }
+.input-group input { width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+
+.gen-btn {
+  background: var(--admin-primary); color: white; border: none; padding: 16px 40px; border-radius: 8px; font-weight: 700; cursor: pointer; transition: 0.3s;
+}
+
+.gen-btn:hover { background: #2980b9; transform: translateY(-1px); }
+
+.key-reveal {
+  margin-top: 30px; padding: 20px; background: #e8f4fd; border: 1px dashed var(--admin-primary); border-radius: 8px; text-align: center; color: var(--admin-primary); font-weight: 700; font-size: 1.2rem;
+}
+
+/* TABLES */
+.table-card { background: white; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.05); }
+
+.admin-table { width: 100%; border-collapse: collapse; background: white; }
+.admin-table th { background: #f8f9fa; text-align: left; padding: 18px 25px; border-bottom: 2px solid var(--border); font-size: 0.9rem; color: #666; }
+.admin-table td { padding: 18px 25px; border-bottom: 1px solid var(--border); font-size: 0.95rem; vertical-align: middle; }
+
+.key-code { background: #eee; padding: 4px 8px; border-radius: 4px; font-weight: 600; font-family: monospace; color: #333; }
+
+.status-pill { padding: 4px 12px; border-radius: 100px; font-size: 0.8rem; font-weight: 700; }
+.status-pill.active { background: #e6fffa; color: #234e52; }
+.status-pill.expired { background: #fff5f5; color: #c53030; }
+
+.error { color: #e74c3c; margin-top: 15px; font-weight: 600; }
+
+/* RENEW BUTTON */
+.renew-btn {
+  background: #e67e22;
+  color: white;
+  border: none;
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-weight: 700;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: 0.2s;
+}
+.renew-btn:hover { background: #d35400; transform: translateY(-1px); }
