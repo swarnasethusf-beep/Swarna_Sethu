@@ -1,0 +1,346 @@
+/**
+ * 💰 Billing engine — single source of truth for every invoice calculation.
+ *
+ * This file is shared: the backend uses it to compute the authoritative totals
+ * when an invoice is saved, and the desktop app uses an identical copy
+ * (frontend/src/shared/billing.js, synced by `npm run sync-shared`) for the
+ * live preview. Edit it here only.
+ *
+ * All arithmetic is done in integers — weights in milligrams, money in paise —
+ * so totals never drift from floating-point error.
+ *
+ * Two invoice modes:
+ *  • "sale"     — shop sells jewellery. GST 3% on (gold + making + stones).
+ *                 Customer's old gold (exchange) is deducted after tax.
+ *  • "job_work" — goldsmith makes jewellery from the customer's own gold.
+ *                 Fine gold the shop adds (item fine − customer fine) is billed
+ *                 at the 24K rate with 3% GST; making/stone labour is job-work
+ *                 (SAC 9988) at 5% GST. Excess customer gold is credited back.
+ */
+
+const GST_RATE_GOLD = 3;      // % — HSN 7113 jewellery / 7108 gold
+const GST_RATE_JOB_WORK = 5;  // % — SAC 9988 job work
+const PAN_THRESHOLD = 200000; // ₹ — Rule 114B: PAN required for jewellery purchase above ₹2 lakh
+const CASH_LIMIT = 200000;    // ₹ — Sec 269ST: cash receipt of ₹2 lakh or more is prohibited
+
+const PURITIES = {
+  "24K": { label: "24K (999)", fineness: 0.999 },
+  "22K": { label: "22K (916)", fineness: 0.916 },
+  "18K": { label: "18K (750)", fineness: 0.75 },
+  "14K": { label: "14K (585)", fineness: 0.585 }
+};
+
+const MAKING_TYPES = {
+  per_gram: "₹ per gram",
+  percent: "% of gold value",
+  fixed: "Fixed ₹"
+};
+
+const PAYMENT_MODES = ["Cash", "UPI", "Card", "Bank Transfer", "Cheque", "Advance"];
+
+const STATES = [
+  ["01", "Jammu & Kashmir"], ["02", "Himachal Pradesh"], ["03", "Punjab"], ["04", "Chandigarh"],
+  ["05", "Uttarakhand"], ["06", "Haryana"], ["07", "Delhi"], ["08", "Rajasthan"],
+  ["09", "Uttar Pradesh"], ["10", "Bihar"], ["11", "Sikkim"], ["12", "Arunachal Pradesh"],
+  ["13", "Nagaland"], ["14", "Manipur"], ["15", "Mizoram"], ["16", "Tripura"],
+  ["17", "Meghalaya"], ["18", "Assam"], ["19", "West Bengal"], ["20", "Jharkhand"],
+  ["21", "Odisha"], ["22", "Chhattisgarh"], ["23", "Madhya Pradesh"], ["24", "Gujarat"],
+  ["26", "Dadra & Nagar Haveli and Daman & Diu"], ["27", "Maharashtra"], ["29", "Karnataka"],
+  ["30", "Goa"], ["31", "Lakshadweep"], ["32", "Kerala"], ["33", "Tamil Nadu"],
+  ["34", "Puducherry"], ["35", "Andaman & Nicobar Islands"], ["36", "Telangana"],
+  ["37", "Andhra Pradesh"], ["38", "Ladakh"]
+].map(([code, name]) => ({ code, name }));
+
+const GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
+const PAN_RE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
+const HUID_RE = /^[A-Z0-9]{6}$/;
+
+// ── Unit helpers ───────────────────────────────────────────────────────────
+function num(v) {
+  const n = typeof v === "number" ? v : parseFloat(v);
+  return Number.isFinite(n) ? n : 0;
+}
+const toMg = (grams) => Math.round(num(grams) * 1000);
+const toPaise = (rupees) => Math.round(num(rupees) * 100);
+const mgToG = (mg) => mg / 1000;
+const paiseToRs = (p) => p / 100;
+/** value (paise) of `mg` milligrams at `ratePaise` per gram */
+const valueOf = (mg, ratePaise) => Math.round((mg * ratePaise) / 1000);
+const pct = (amountPaise, percent) => Math.round((amountPaise * num(percent)) / 100);
+
+function finenessOf(purity) {
+  return (PURITIES[purity] || PURITIES["22K"]).fineness;
+}
+
+// ── Item (new jewellery) ───────────────────────────────────────────────────
+function computeItem(raw, rates, mode) {
+  const purity = PURITIES[raw.purity] ? raw.purity : "22K";
+  const grossMg = Math.max(0, toMg(raw.grossWt));
+  const stoneMg = Math.min(grossMg, Math.max(0, toMg(raw.stoneWt)));
+  const netMg = grossMg - stoneMg;
+  const wastagePct = Math.max(0, num(raw.wastagePct));
+  const effectiveMg = Math.round(netMg * (1 + wastagePct / 100)); // gold charged incl. wastage (VA)
+  const fineMg = Math.round(effectiveMg * finenessOf(purity));
+
+  const ratePaise = toPaise(raw.rate != null && raw.rate !== "" ? raw.rate : rates[purity]);
+  // In job work the gold is settled in fine weight, so gold value isn't billed per item.
+  const goldPaise = mode === "job_work" ? 0 : valueOf(effectiveMg, ratePaise);
+
+  const makingType = MAKING_TYPES[raw.makingType] ? raw.makingType : "per_gram";
+  let makingPaise;
+  if (makingType === "per_gram") makingPaise = valueOf(netMg, toPaise(raw.makingValue));
+  else if (makingType === "percent") makingPaise = pct(valueOf(effectiveMg, ratePaise), raw.makingValue);
+  else makingPaise = toPaise(raw.makingValue);
+  makingPaise = Math.max(0, makingPaise);
+
+  const stonePaise = Math.max(0, toPaise(raw.stoneCharges));
+  const linePaise = goldPaise + makingPaise + stonePaise;
+
+  return {
+    productId: raw.productId || null,
+    itemCode: String(raw.itemCode || "").trim().toUpperCase(),
+    description: String(raw.description || "").trim(),
+    hsn: String(raw.hsn || (mode === "job_work" ? "9988" : "7113")).trim(),
+    huid: String(raw.huid || "").trim().toUpperCase(),
+    purity,
+    pcs: Math.max(1, Math.round(num(raw.pcs) || 1)),
+    grossWt: mgToG(grossMg),
+    stoneWt: mgToG(stoneMg),
+    netWt: mgToG(netMg),
+    wastagePct,
+    effectiveWt: mgToG(effectiveMg),
+    fineWt: mgToG(fineMg),
+    rate: paiseToRs(ratePaise),
+    makingType,
+    makingValue: num(raw.makingValue),
+    goldValue: paiseToRs(goldPaise),
+    makingAmount: paiseToRs(makingPaise),
+    stoneCharges: paiseToRs(stonePaise),
+    lineTotal: paiseToRs(linePaise),
+    _p: { fineMg, goldPaise, makingPaise, stonePaise, linePaise, netMg }
+  };
+}
+
+// ── Old gold (customer's gold: exchange in sale, raw material in job work) ─
+function computeOldGold(raw, rate24Paise) {
+  const grossMg = Math.max(0, toMg(raw.grossWt));
+  const lessMg = Math.min(grossMg, Math.max(0, toMg(raw.lessWt))); // stones / dust / wax
+  const netMg = grossMg - lessMg;
+  const touch = Math.min(100, Math.max(0, raw.touch === "" || raw.touch == null ? 91.6 : num(raw.touch)));
+  const fineMg = Math.round((netMg * touch) / 100);
+  const valuePaise = valueOf(fineMg, rate24Paise);
+  return {
+    description: String(raw.description || "Old gold").trim(),
+    grossWt: mgToG(grossMg),
+    lessWt: mgToG(lessMg),
+    netWt: mgToG(netMg),
+    touch,
+    fineWt: mgToG(fineMg),
+    rate: paiseToRs(rate24Paise),
+    value: paiseToRs(valuePaise),
+    _p: { fineMg, valuePaise }
+  };
+}
+
+function taxLine(label, hsn, taxablePaise, ratePct, intraState) {
+  let cgst = 0, sgst = 0, igst = 0;
+  if (intraState) {
+    cgst = pct(taxablePaise, ratePct / 2);
+    sgst = cgst;
+  } else {
+    igst = pct(taxablePaise, ratePct);
+  }
+  return { label, hsn, ratePct, taxablePaise, cgst, sgst, igst, tax: cgst + sgst + igst };
+}
+
+/**
+ * Compute a full invoice.
+ * @param {object} input  { mode, items[], oldGold[], payments[], rates{24K,22K,18K,14K}, customer{stateCode,pan,gstin} }
+ * @param {object} shop   { stateCode }
+ * @returns {object} normalized lines, summary (rupees), issues[]
+ */
+function computeInvoice(input, shop = {}) {
+  const mode = input.mode === "job_work" ? "job_work" : "sale";
+  const rates = {};
+  for (const k of Object.keys(PURITIES)) rates[k] = num(input.rates?.[k]);
+  const rate24Paise = toPaise(rates["24K"]);
+
+  const customer = input.customer || {};
+  const shopState = shop.stateCode || "";
+  const customerState = customer.stateCode || shopState;
+  const intraState = !shopState || !customerState || shopState === customerState;
+
+  const items = (input.items || [])
+    .filter((r) => r && (num(r.grossWt) > 0 || String(r.itemCode || r.description || "").trim()))
+    .map((r) => computeItem(r, rates, mode));
+  const oldGold = (input.oldGold || [])
+    .filter((r) => r && num(r.grossWt) > 0)
+    .map((r) => computeOldGold(r, rate24Paise));
+
+  const sum = (arr, f) => arr.reduce((s, x) => s + f(x), 0);
+  const itemsFineMg = sum(items, (i) => i._p.fineMg);
+  const oldFineMg = sum(oldGold, (o) => o._p.fineMg);
+  const goldPaise = sum(items, (i) => i._p.goldPaise);
+  const makingPaise = sum(items, (i) => i._p.makingPaise);
+  const stonePaise = sum(items, (i) => i._p.stonePaise);
+  const oldGoldPaise = sum(oldGold, (o) => o._p.valuePaise);
+
+  const taxLines = [];
+  let creditPaise = 0;       // amount deducted after tax (old gold exchange / excess gold)
+  let addedFineMg = 0;       // job work: fine gold supplied by the shop
+  let excessFineMg = 0;      // job work: customer's surplus fine gold
+
+  if (mode === "sale") {
+    taxLines.push(taxLine("Gold jewellery", "7113", goldPaise + makingPaise + stonePaise, GST_RATE_GOLD, intraState));
+    creditPaise = oldGoldPaise;
+  } else {
+    addedFineMg = Math.max(0, itemsFineMg - oldFineMg);
+    excessFineMg = Math.max(0, oldFineMg - itemsFineMg);
+    const addedGoldPaise = valueOf(addedFineMg, rate24Paise);
+    if (addedGoldPaise > 0) taxLines.push(taxLine("Fine gold supplied", "7108", addedGoldPaise, GST_RATE_GOLD, intraState));
+    taxLines.push(taxLine("Job work charges", "9988", makingPaise + stonePaise, GST_RATE_JOB_WORK, intraState));
+    creditPaise = valueOf(excessFineMg, rate24Paise);
+  }
+
+  const taxablePaise = sum(taxLines, (t) => t.taxablePaise);
+  const cgst = sum(taxLines, (t) => t.cgst);
+  const sgst = sum(taxLines, (t) => t.sgst);
+  const igst = sum(taxLines, (t) => t.igst);
+  const taxPaise = cgst + sgst + igst;
+  const invoiceTotalPaise = taxablePaise + taxPaise;
+  const netPaise = invoiceTotalPaise - creditPaise;
+  const roundedPaise = Math.round(netPaise / 100) * 100;
+  const roundOffPaise = roundedPaise - netPaise;
+
+  const payments = (input.payments || [])
+    .filter((p) => p && toPaise(p.amount) > 0)
+    .map((p) => ({
+      mode: PAYMENT_MODES.includes(p.mode) ? p.mode : "Cash",
+      amount: paiseToRs(toPaise(p.amount)),
+      reference: String(p.reference || "").trim()
+    }));
+  const paidPaise = sum(payments, (p) => toPaise(p.amount));
+  const cashPaise = sum(payments.filter((p) => p.mode === "Cash"), (p) => toPaise(p.amount));
+
+  // ── Compliance & sanity checks ──────────────────────────────────────────
+  const issues = [];
+  const err = (code, message) => issues.push({ level: "error", code, message });
+  const warn = (code, message) => issues.push({ level: "warning", code, message });
+
+  if (items.length === 0) err("NO_ITEMS", "Add at least one item.");
+  items.forEach((it, i) => {
+    const n = `Item ${i + 1}`;
+    if (!it.description) err("ITEM_DESC", `${n}: description is required.`);
+    if (it._p.netMg <= 0) err("ITEM_WEIGHT", `${n}: net weight must be greater than 0.`);
+    if (mode === "sale" && it.rate <= 0) err("ITEM_RATE", `${n}: no rate set for ${it.purity}.`);
+    if (it.huid && !HUID_RE.test(it.huid)) err("ITEM_HUID", `${n}: HUID must be 6 letters/digits.`);
+  });
+  if ((oldGold.length > 0 || mode === "job_work") && rate24Paise <= 0)
+    err("RATE_24K", "Set the 24K (fine gold) rate — it values old gold and fine-gold settlement.");
+  if (mode === "job_work" && oldGold.length === 0)
+    warn("JOB_NO_GOLD", "Job work without customer gold — all fine gold will be billed as supplied by the shop.");
+
+  const payableRs = paiseToRs(roundedPaise);
+  if (payableRs > PAN_THRESHOLD && !PAN_RE.test(String(customer.pan || "").toUpperCase()))
+    err("PAN_REQUIRED", `Customer PAN is required for bills above ₹${PAN_THRESHOLD.toLocaleString("en-IN")}.`);
+  if (customer.pan && !PAN_RE.test(String(customer.pan).toUpperCase()))
+    err("PAN_FORMAT", "PAN format is invalid (e.g. ABCDE1234F).");
+  if (customer.gstin && !GSTIN_RE.test(String(customer.gstin).toUpperCase()))
+    err("GSTIN_FORMAT", "Customer GSTIN format is invalid.");
+  if (paiseToRs(cashPaise) >= CASH_LIMIT)
+    err("CASH_LIMIT", `Cash of ₹${CASH_LIMIT.toLocaleString("en-IN")} or more cannot be accepted (Sec 269ST).`);
+  if (roundedPaise >= 0 && paidPaise > roundedPaise)
+    err("OVERPAID", "Payments exceed the amount payable.");
+  if (roundedPaise < 0 && paidPaise > 0)
+    warn("REFUND_DUE", "Customer is owed money — record payments only when the shop receives money.");
+
+  const strip = ({ _p, ...rest }) => rest;
+  return {
+    mode,
+    intraState,
+    customerStateCode: customerState,
+    rates,
+    items: items.map(strip),
+    oldGold: oldGold.map(strip),
+    payments,
+    summary: {
+      itemsNetWt: mgToG(sum(items, (i) => i._p.netMg)),
+      itemsFineWt: mgToG(itemsFineMg),
+      oldGoldFineWt: mgToG(oldFineMg),
+      addedFineWt: mgToG(addedFineMg),
+      excessFineWt: mgToG(excessFineMg),
+      goldValue: paiseToRs(goldPaise),
+      makingTotal: paiseToRs(makingPaise),
+      stoneTotal: paiseToRs(stonePaise),
+      oldGoldValue: paiseToRs(oldGoldPaise),
+      taxLines: taxLines.map((t) => ({
+        label: t.label, hsn: t.hsn, ratePct: t.ratePct,
+        taxable: paiseToRs(t.taxablePaise),
+        cgst: paiseToRs(t.cgst), sgst: paiseToRs(t.sgst), igst: paiseToRs(t.igst), tax: paiseToRs(t.tax)
+      })),
+      taxable: paiseToRs(taxablePaise),
+      cgst: paiseToRs(cgst),
+      sgst: paiseToRs(sgst),
+      igst: paiseToRs(igst),
+      tax: paiseToRs(taxPaise),
+      invoiceTotal: paiseToRs(invoiceTotalPaise),
+      credit: paiseToRs(creditPaise),
+      creditLabel: mode === "sale" ? "Less: old gold exchange" : "Less: excess customer gold",
+      roundOff: paiseToRs(roundOffPaise),
+      payable: payableRs,
+      paid: paiseToRs(paidPaise),
+      balance: paiseToRs(roundedPaise - paidPaise)
+    },
+    issues
+  };
+}
+
+// ── Formatting helpers ─────────────────────────────────────────────────────
+const ONES = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
+  "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen"];
+const TENS = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"];
+
+function twoDigits(n) {
+  return n < 20 ? ONES[n] : `${TENS[Math.floor(n / 10)]}${n % 10 ? " " + ONES[n % 10] : ""}`;
+}
+function threeDigits(n) {
+  const h = Math.floor(n / 100), r = n % 100;
+  return [h ? `${ONES[h]} Hundred` : "", r ? twoDigits(r) : ""].filter(Boolean).join(" ");
+}
+/** Indian-system amount in words, e.g. 123456.5 → "Rupees One Lakh Twenty Three Thousand Four Hundred Fifty Six and Fifty Paise Only" */
+function amountInWords(amount) {
+  const paiseTotal = Math.round(Math.abs(num(amount)) * 100);
+  let rupees = Math.floor(paiseTotal / 100);
+  const paise = paiseTotal % 100;
+  if (rupees === 0 && paise === 0) return "Rupees Zero Only";
+  const parts = [];
+  const crore = Math.floor(rupees / 10000000); rupees %= 10000000;
+  const lakh = Math.floor(rupees / 100000); rupees %= 100000;
+  const thousand = Math.floor(rupees / 1000); rupees %= 1000;
+  if (crore) parts.push(`${crore >= 100 ? threeDigits(crore) : twoDigits(crore)} Crore`);
+  if (lakh) parts.push(`${twoDigits(lakh)} Lakh`);
+  if (thousand) parts.push(`${twoDigits(thousand)} Thousand`);
+  if (rupees) parts.push(threeDigits(rupees));
+  let words = parts.length ? `Rupees ${parts.join(" ")}` : "Rupees Zero";
+  if (paise) words += ` and ${twoDigits(paise)} Paise`;
+  return `${words} Only`;
+}
+
+/** Indian financial year label for a YYYY-MM-DD date, e.g. "2026-10-06" → "2026-27" */
+function financialYear(dateStr) {
+  const [y, m] = String(dateStr).split("-").map(Number);
+  const start = m >= 4 ? y : y - 1;
+  return `${start}-${String((start + 1) % 100).padStart(2, "0")}`;
+}
+
+function formatInvoiceNumber(prefix, fy, seq) {
+  const p = String(prefix || "INV").trim().toUpperCase() || "INV";
+  return `${p}/${fy.slice(2)}/${String(seq).padStart(4, "0")}`;
+}
+
+module.exports = {
+  GST_RATE_GOLD, GST_RATE_JOB_WORK, PAN_THRESHOLD, CASH_LIMIT,
+  PURITIES, MAKING_TYPES, PAYMENT_MODES, STATES,
+  GSTIN_RE, PAN_RE, HUID_RE,
+  computeInvoice, amountInWords, financialYear, formatInvoiceNumber
+};

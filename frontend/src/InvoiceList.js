@@ -1,127 +1,91 @@
-import React, { useState, useEffect } from "react";
-import axios from "axios";
+import React, { useState, useEffect, useCallback } from "react";
+import api, { errMsg } from "./api";
+import { inr, displayDate, daysAgo, todayLocal } from "./format";
 
 /**
- * 📋 Invoice List — shows all invoices with "New Invoice" button
+ * 📋 Invoice List — date range + search, click a row to open the printable invoice
  */
-function InvoiceList({ licenseDocId, userId, userRole, showCreatedBy, onNewInvoice }) {
+function InvoiceList({ canCreate, showCreatedBy, onNewInvoice, onOpen }) {
+  const [from, setFrom] = useState(daysAgo(29));
+  const [to, setTo] = useState(todayLocal());
+  const [q, setQ] = useState("");
   const [invoices, setInvoices] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
-  useEffect(() => {
-    fetchInvoices();
-  }, []);
-
-  const fetchInvoices = async () => {
-    setLoading(true);
+  const load = useCallback(async () => {
+    setLoading(true); setError("");
     try {
-      const res = await axios.get("http://localhost:5000/invoices", {
-        params: { licenseDocId, role: userRole, userId }
-      });
-      setInvoices(res.data);
+      const { data } = await api.get("/invoices", { params: { from, to, q } });
+      setInvoices(data.invoices);
     } catch (err) {
-      console.error("Failed to fetch invoices:", err);
+      setError(errMsg(err, "Failed to load invoices."));
     } finally {
       setLoading(false);
     }
-  };
+  }, [from, to, q]);
 
-  const formatCurrency = (val) =>
-    `₹ ${parseFloat(val || 0).toLocaleString("en-IN", { minimumFractionDigits: 2 })}`;
+  useEffect(() => {
+    const t = setTimeout(load, 250); // debounce typing in search
+    return () => clearTimeout(t);
+  }, [load]);
 
-  const formatDate = (dateStr) => {
-    if (!dateStr) return "—";
-    return dateStr;
-  };
+  const active = invoices.filter((i) => i.status !== "cancelled");
+  const total = active.reduce((s, i) => s + (i.payable || 0), 0);
+  const due = active.reduce((s, i) => s + Math.max(0, i.balance || 0), 0);
 
   return (
-    <div className="staff-mgmt-page">
-      <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+    <div>
+      <div className="page-header">
         <div>
           <h1>Invoices</h1>
-          <p>View and manage all billing records</p>
+          <p>{active.length} bills · {inr(total)}{due > 0 ? ` · ${inr(due)} due` : ""}</p>
         </div>
-        <button
-          onClick={onNewInvoice}
-          style={{
-            padding: "11px 24px",
-            background: "linear-gradient(135deg, #b8860b, #ffd700)",
-            color: "white", border: "none", borderRadius: "10px",
-            fontWeight: 700, fontSize: "0.95rem", cursor: "pointer",
-            boxShadow: "0 4px 15px rgba(184,134,11,0.3)",
-            display: "flex", alignItems: "center", gap: "8px"
-          }}
-        >
-          ➕ New Invoice
-        </button>
-      </header>
+        {canCreate && <button className="btn btn-primary" onClick={onNewInvoice}>➕ New Invoice</button>}
+      </div>
 
-      <div className="table-card" style={{ marginTop: "24px" }}>
+      <div className="filter-bar">
+        <label>From <input type="date" value={from} max={to} onChange={(e) => setFrom(e.target.value)} /></label>
+        <label>To <input type="date" value={to} min={from} onChange={(e) => setTo(e.target.value)} /></label>
+        <input className="search" placeholder="🔍 Invoice no., customer or mobile" value={q} onChange={(e) => setQ(e.target.value)} />
+      </div>
+
+      {error && <div className="alert error">{error}</div>}
+      <div className="table-card">
         {loading ? (
-          <div style={{ textAlign: "center", padding: "60px", color: "#aaa" }}>
-            Loading invoices...
-          </div>
+          <div className="empty">Loading invoices…</div>
         ) : invoices.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "60px 20px", color: "#aaa" }}>
-            <div style={{ fontSize: "3rem", marginBottom: "12px" }}>📜</div>
-            <p style={{ fontWeight: 600, fontSize: "1rem" }}>No invoices yet</p>
-            <p style={{ fontSize: "0.85rem" }}>Click "New Invoice" to create your first bill</p>
+          <div className="empty">
+            <div className="big-emoji">📜</div>
+            <p><strong>No invoices in this period</strong></p>
+            {canCreate && <p>Click “New Invoice” to create a bill.</p>}
           </div>
         ) : (
-          <table className="admin-table">
+          <table className="admin-table clickable">
             <thead>
               <tr>
-                <th>#</th>
-                <th>Invoice No.</th>
-                <th>Customer</th>
-                <th>Contact</th>
-                <th>Date</th>
-                <th>Total Amount</th>
-                <th>Payment</th>
-                {showCreatedBy && userRole === "super_admin" && <th>Created By</th>}
+                <th>Invoice No.</th><th>Date</th><th>Customer</th><th>Type</th><th>Payment</th>
+                <th className="right">Amount</th><th className="right">Balance</th><th>Status</th>
+                {showCreatedBy && <th>Created By</th>}
+                <th className="no-print"></th>
               </tr>
             </thead>
             <tbody>
-              {invoices.map((inv, i) => (
-                <tr key={inv.id}>
-                  <td style={{ color: "#aaa", fontWeight: 600 }}>{i + 1}</td>
-                  <td>
-                    <span style={{
-                      background: "#fef9e7", color: "#b8860b",
-                      padding: "3px 10px", borderRadius: "8px",
-                      fontSize: "0.82rem", fontWeight: 700
-                    }}>
-                      {inv.invoiceNumber || "—"}
-                    </span>
+              {invoices.map((inv) => (
+                <tr key={inv.id} onClick={() => onOpen(inv.id)} className={inv.status === "cancelled" ? "row-cancelled" : ""}>
+                  <td className="nowrap"><span className="pill gold">{inv.invoiceNumber || "—"}</span></td>
+                  <td className="nowrap">{displayDate(inv.date)}</td>
+                  <td><strong>{inv.customerName || "—"}</strong><div className="sub">{inv.customerMobile}</div></td>
+                  <td>{inv.mode === "job_work" ? "Job work" : "Sale"}</td>
+                  <td>{inv.paymentModes || "—"}</td>
+                  <td className="right strong nowrap">{inr(inv.payable)}</td>
+                  <td className="right nowrap">{inv.balance > 0 ? <span className="text-warn">{inr(inv.balance)}</span> : "—"}</td>
+                  <td>{inv.status === "cancelled" ? <span className="pill danger">Cancelled</span> : <span className="pill ok">Active</span>}</td>
+                  {showCreatedBy && <td className="nowrap"><span className="pill blue">👤 {inv.createdByName || "—"}</span></td>}
+                  <td className="nowrap no-print" onClick={(e) => e.stopPropagation()}>
+                    <button className="btn btn-sm btn-secondary" title="Print invoice" onClick={() => onOpen(inv.id, "print")}>🖨️ Print</button>{" "}
+                    <button className="btn btn-sm btn-secondary" title="Save invoice as PDF" onClick={() => onOpen(inv.id, "pdf")}>⬇️ PDF</button>
                   </td>
-                  <td style={{ fontWeight: 600 }}>{inv.customerName || "—"}</td>
-                  <td>{inv.customerContact || "—"}</td>
-                  <td>{formatDate(inv.date)}</td>
-                  <td style={{ fontWeight: 700, color: "#27ae60" }}>
-                    {formatCurrency(inv.totals?.grand)}
-                  </td>
-                  <td>
-                    <span style={{
-                      background: inv.paymentMode === "Cash" ? "#eafaf1" : "#eaf4fb",
-                      color: inv.paymentMode === "Cash" ? "#27ae60" : "#2980b9",
-                      padding: "3px 10px", borderRadius: "12px",
-                      fontSize: "0.78rem", fontWeight: 600
-                    }}>
-                      {inv.paymentMode || "—"}
-                    </span>
-                  </td>
-                  {showCreatedBy && userRole === "super_admin" && (
-                    <td>
-                      <span style={{
-                        background: inv.createdByName ? "#eaf4fb" : "#f5f5f5",
-                        color: inv.createdByName ? "#2980b9" : "#bbb",
-                        padding: "3px 10px", borderRadius: "12px",
-                        fontSize: "0.78rem", fontWeight: 600
-                      }}>
-                        👤 {inv.createdByName || "—"}
-                      </span>
-                    </td>
-                  )}
                 </tr>
               ))}
             </tbody>

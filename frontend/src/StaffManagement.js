@@ -1,11 +1,19 @@
-import React, { useState } from "react";
-import axios from "axios";
+import React, { useState, useEffect, useCallback } from "react";
+import api, { errMsg } from "./api";
 
 /**
- * 👥 Staff Management — List first, Create on button click
+ * 👥 Staff Management — List first, Create/Edit on button click
  */
-function StaffManagement({ fetchStaff, staffList, licenseDocId, userId, userName, userRole, showCreatedBy }) {
+function StaffManagement({ userRole, showCreatedBy }) {
   const [view, setView] = useState("list"); // "list" | "form"
+  const [staffList, setStaffList] = useState([]);
+  const [editingId, setEditingId] = useState(null);
+  const [error, setError] = useState("");
+
+  const fetchStaff = useCallback(() => {
+    api.get("/staff").then(({ data }) => setStaffList(data)).catch((err) => setError(errMsg(err)));
+  }, []);
+  useEffect(fetchStaff, [fetchStaff]);
 
   const [formData, setFormData] = useState({
     joiningDate: new Date().toISOString().split('T')[0],
@@ -30,7 +38,7 @@ function StaffManagement({ fetchStaff, staffList, licenseDocId, userId, userName
     remark: ""
   });
 
-  const resetForm = () => setFormData({
+  const resetForm = () => { setEditingId(null); setError(""); setFormData({
     joiningDate: new Date().toISOString().split('T')[0],
     referredBy: "", designation: "", department: "",
     fullName: "", gender: "Male", address: "", emailId: "",
@@ -39,20 +47,35 @@ function StaffManagement({ fetchStaff, staffList, licenseDocId, userId, userName
     bloodGroup: "", documentType: "", documentNo: "",
     communicationSms: true, communicationEmail: true,
     salesCommission: false, remark: ""
-  });
+  }); };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    setError("");
     try {
-      await axios.post("http://localhost:5000/add-staff", {
-        licenseDocId, userId, userName, ...formData
-      });
-      alert("Staff Member Registered Successfully!");
+      if (editingId) await api.put(`/staff/${editingId}`, formData);
+      else await api.post("/staff", formData);
       resetForm();
       fetchStaff();
       setView("list"); // go back to list after save
     } catch (err) {
-      alert("Failed to register staff.");
+      setError(errMsg(err, "Failed to save staff member."));
+    }
+  };
+
+  const startEdit = (s) => {
+    setFormData((prev) => Object.fromEntries(Object.keys(prev).map((k) => [k, s[k] ?? prev[k]])));
+    setEditingId(s.id);
+    setView("form");
+  };
+
+  const handleDelete = async (s) => {
+    if (!window.confirm(`Remove ${s.fullName} from staff?`)) return;
+    try {
+      await api.delete(`/staff/${s.id}`);
+      fetchStaff();
+    } catch (err) {
+      alert(errMsg(err));
     }
   };
 
@@ -68,7 +91,7 @@ function StaffManagement({ fetchStaff, staffList, licenseDocId, userId, userName
             <p>Manage your workforce profiles</p>
           </div>
           <button
-            onClick={() => setView("form")}
+            onClick={() => { resetForm(); setView("form"); }}
             style={{
               padding: "11px 24px",
               background: "linear-gradient(135deg, #b8860b, #ffd700)",
@@ -82,6 +105,7 @@ function StaffManagement({ fetchStaff, staffList, licenseDocId, userId, userName
           </button>
         </header>
 
+        {error && <div className="alert error">{error}</div>}
         <div className="table-card" style={{ marginTop: "24px" }}>
           {staffList.length === 0 ? (
             <div style={{
@@ -104,6 +128,7 @@ function StaffManagement({ fetchStaff, staffList, licenseDocId, userId, userName
                   <th>Joining Date</th>
                   <th>Gender</th>
                   {showCreatedBy && userRole === "super_admin" && <th>Created By</th>}
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
@@ -149,6 +174,10 @@ function StaffManagement({ fetchStaff, staffList, licenseDocId, userId, userName
                         </span>
                       </td>
                     )}
+                    <td className="nowrap">
+                      <button className="btn btn-sm btn-secondary" onClick={() => startEdit(s)}>Edit</button>{" "}
+                      <button className="btn btn-sm btn-danger" onClick={() => handleDelete(s)}>Remove</button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -164,7 +193,7 @@ function StaffManagement({ fetchStaff, staffList, licenseDocId, userId, userName
     <div className="staff-mgmt-page">
       <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div>
-          <h1>Create Staff Profile</h1>
+          <h1>{editingId ? "Edit Staff Profile" : "Create Staff Profile"}</h1>
           <p>Fill in the details and save the staff member</p>
         </div>
         <button
@@ -207,7 +236,7 @@ function StaffManagement({ fetchStaff, staffList, licenseDocId, userId, userName
               <input type="text" value={formData.emergencyContactPerson} onChange={e => f("emergencyContactPerson", e.target.value)} />
             </div>
             <div className="input-row"><label>Contact No</label>
-              <input type="text" value={formData.emergencyContactNo} onChange={e => f("emergencyContactNo", e.target.value)} />
+              <input type="tel" inputMode="numeric" maxLength={10} value={formData.emergencyContactNo} onChange={e => f("emergencyContactNo", e.target.value.replace(/\D/g, ""))} />
             </div>
             <div className="input-row"><label>Blood Group</label>
               <select value={formData.bloodGroup} onChange={e => f("bloodGroup", e.target.value)}>
@@ -226,7 +255,7 @@ function StaffManagement({ fetchStaff, staffList, licenseDocId, userId, userName
                 <input type="text" value={formData.fullName} onChange={e => f("fullName", e.target.value)} required />
               </div>
               <div className="input-row"><label>Mobile No. *</label>
-                <input type="text" value={formData.mobileNo} onChange={e => f("mobileNo", e.target.value)} required />
+                <input type="tel" inputMode="numeric" maxLength={10} value={formData.mobileNo} onChange={e => f("mobileNo", e.target.value.replace(/\D/g, ""))} required />
               </div>
               <div className="input-row"><label>Email ID</label>
                 <input type="email" value={formData.emailId} onChange={e => f("emailId", e.target.value)} />
@@ -241,6 +270,7 @@ function StaffManagement({ fetchStaff, staffList, licenseDocId, userId, userName
                 <div className="radio-group" style={{ display: "flex", gap: "16px", marginTop: "8px" }}>
                   <label><input type="radio" checked={formData.gender === "Male"} onChange={() => f("gender", "Male")} /> Male</label>
                   <label><input type="radio" checked={formData.gender === "Female"} onChange={() => f("gender", "Female")} /> Female</label>
+                  <label><input type="radio" checked={formData.gender === "Other"} onChange={() => f("gender", "Other")} /> Other</label>
                 </div>
               </div>
             </div>
@@ -276,6 +306,7 @@ function StaffManagement({ fetchStaff, staffList, licenseDocId, userId, userName
 
         </div>
 
+        {error && <div className="alert error">{error}</div>}
         {/* Footer Buttons */}
         <div style={{ display: "flex", gap: "12px", marginTop: "24px", justifyContent: "flex-end" }}>
           <button
@@ -298,7 +329,7 @@ function StaffManagement({ fetchStaff, staffList, licenseDocId, userId, userName
               boxShadow: "0 4px 15px rgba(184,134,11,0.3)"
             }}
           >
-            💾 Save Staff Profile
+            💾 {editingId ? "Update" : "Save"} Staff Profile
           </button>
         </div>
       </form>
