@@ -193,6 +193,61 @@ ipcMain.handle("invoice:save-pdf", async (event, fileName) => {
   return { filePath };
 });
 
+// ─── Barcode labels: list printers, print to one (no dialog), or save as PDF ───
+ipcMain.handle("labels:printers", async (event) => {
+  const printers = await event.sender.getPrintersAsync();
+  return printers.map((p) => ({ name: p.name, displayName: p.displayName || p.name, isDefault: !!p.isDefault }));
+});
+
+/** Loads the label HTML in a hidden window; resolves with that window once it has rendered */
+async function loadLabelWindow(html) {
+  const win = new BrowserWindow({ show: false, webPreferences: { sandbox: true, javascript: false } });
+  await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  return win;
+}
+
+ipcMain.handle("labels:print", async (event, { html, widthMm, heightMm, deviceName }) => {
+  const win = await loadLabelWindow(String(html));
+  try {
+    await new Promise((resolve, reject) => {
+      win.webContents.print({
+        silent: true,
+        printBackground: true,
+        deviceName: deviceName || "",            // empty = the system default printer
+        margins: { marginType: "none" },
+        pageSize: { width: Math.round(widthMm * 1000), height: Math.round(heightMm * 1000) } // microns
+      }, (success, reason) => (success ? resolve() : reject(new Error(reason || "Printing failed"))));
+    });
+    return { printed: true };
+  } finally {
+    win.destroy();
+  }
+});
+
+ipcMain.handle("labels:pdf", async (event, { html, widthMm, heightMm }) => {
+  const parent = BrowserWindow.fromWebContents(event.sender);
+  const { canceled, filePath } = await dialog.showSaveDialog(parent, {
+    title: "Save barcode labels as PDF",
+    defaultPath: path.join(app.getPath("documents"), "Barcode labels.pdf"),
+    filters: [{ name: "PDF", extensions: ["pdf"] }]
+  });
+  if (canceled || !filePath) return { canceled: true };
+  const win = await loadLabelWindow(String(html));
+  try {
+    const pdf = await win.webContents.printToPDF({
+      printBackground: true,
+      preferCSSPageSize: true,
+      pageSize: { width: widthMm / 25.4, height: heightMm / 25.4 }, // inches
+      margins: { marginType: "none" }
+    });
+    fs.writeFileSync(filePath, pdf);
+  } finally {
+    win.destroy();
+  }
+  shell.showItemInFolder(filePath);
+  return { filePath };
+});
+
 // ─── App Lifecycle ─────────────────────────────────────────────────────────────
 app.whenReady().then(createWindow);
 

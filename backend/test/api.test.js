@@ -131,6 +131,29 @@ test("inventory: add piece, unique item code, billing lookup", async () => {
   assert.equal(look.body.netWt, 20);
 });
 
+test("barcodes: blank item code is generated, scan lookup finds in-stock and sold pieces", async () => {
+  const piece = { description: "Barcode ring", purity: "22K", grossWt: 4, wastagePct: 8, makingType: "fixed", makingValue: 900 };
+  const a = await call("POST", "/products", { token: state.owner, body: piece });
+  const b = await call("POST", "/products", { token: state.owner, body: piece });
+  assert.equal(a.status, 200);
+  assert.match(a.body.itemCode, /^SS\d{5}$/);
+  assert.notEqual(a.body.itemCode, b.body.itemCode);            // each label is unique
+  // a code typed by hand is not reused by the generator
+  const next = String(Number(b.body.itemCode.slice(2)) + 1).padStart(5, "0");
+  await call("POST", "/products", { token: state.owner, body: { ...piece, itemCode: `SS${next}` } });
+  const c = await call("POST", "/products", { token: state.owner, body: piece });
+  assert.notEqual(c.body.itemCode, `SS${next}`);
+  // scanner input is trimmed and case-insensitive
+  const scan = await call("GET", `/products/by-code/${encodeURIComponent(" " + a.body.itemCode.toLowerCase() + " ")}`, { token: state.owner });
+  assert.equal(scan.status, 200);
+  assert.equal(scan.body.itemCode, a.body.itemCode);
+  assert.equal((await call("GET", "/products/by-code/NOPE-1", { token: state.owner })).status, 404);
+  // billing staff without the inventory permission cannot use the inventory scan route
+  assert.equal((await call("GET", `/products/by-code/${a.body.itemCode}`, { token: state.ravi })).status, 403);
+  // and the billing lookup still fills the invoice row from the scanned code
+  assert.equal((await call("GET", `/products/lookup/${a.body.itemCode}`, { token: state.ravi })).body.description, "Barcode ring");
+});
+
 test("invoice: totals computed on the server, consecutive numbers, stock marked sold", async () => {
   const body = {
     mode: "sale",
@@ -197,11 +220,49 @@ test("cancel: owner only, keeps the number, returns stock", async () => {
   assert.equal(product.status, "in_stock");
 
   const report = await call("GET", "/reports/sales", { token: state.owner });
-  assert.equal(report.body.totals.count, 1);
+  // the remaining bill is job work that hasn't been delivered yet, so it is not a finished sale (see jobwork.test.js)
+  assert.equal(report.body.totals.count, 0);
+  assert.equal(report.body.totals.pendingJobWork.count, 1);
   assert.equal(report.body.totals.cancelled, 1);
-  assert.equal(report.body.totals.payable, 40897);
-  assert.equal(report.body.byHsn.length, 2);
   assert.equal((await call("GET", "/reports/sales", { token: state.ravi })).status, 403);
+});
+
+test("secret invoice: stock item is permanently removed from Firebase, invoice log is not saved", async () => {
+  // 1. Register a new item in inventory
+  const addPiece = await call("POST", "/products", { token: state.owner, body: {
+    itemCode: "SEC-RING-01", description: "Secret Gold Ring", purity: "22K",
+    grossWt: 5.5, stoneWt: 0.5, wastagePct: 10, makingType: "per_gram", makingValue: 400
+  } });
+  assert.equal(addPiece.status, 200);
+  const secretProdId = addPiece.body.id;
+  assert.ok(db._store.get(`licenses/${state.licenseId}/products/${secretProdId}`));
+
+  // Invoices count before
+  const listBefore = await call("GET", "/invoices", { token: state.owner });
+  const invoiceCountBefore = listBefore.body.invoices.length;
+
+  // 2. Perform secret sale
+  const saleRes = await call("POST", "/invoices/secret-sale", { token: state.owner, body: {
+    mode: "sale", rates: { "22K": 6500 },
+    customer: { name: "Cash Walk-in" },
+    items: [{ productId: secretProdId, itemCode: "SEC-RING-01", description: "Secret Gold Ring", purity: "22K", grossWt: 5.5, stoneWt: 0.5, wastagePct: 10, makingType: "per_gram", makingValue: 400 }],
+    payments: [{ mode: "Cash", amount: 30000 }]
+  } });
+  assert.equal(saleRes.status, 200, JSON.stringify(saleRes.body));
+  assert.equal(saleRes.body.isSecret, true);
+  assert.ok(saleRes.body.invoiceNumber.startsWith("EST-"));
+
+  // 3. Product must be PERMANENTLY REMOVED (deleted) from database
+  assert.equal(db._store.get(`licenses/${state.licenseId}/products/${secretProdId}`), undefined);
+
+  // 4. Invoice log must NOT contain this invoice
+  const listAfter = await call("GET", "/invoices", { token: state.owner });
+  assert.equal(listAfter.body.invoices.length, invoiceCountBefore);
+  assert.ok(!listAfter.body.invoices.some((i) => i.invoiceNumber === saleRes.body.invoiceNumber));
+
+  // 5. Reports must NOT include this invoice
+  const report = await call("GET", "/reports/sales", { token: state.owner });
+  assert.ok(!report.body.invoices.some((i) => i.invoiceNumber === saleRes.body.invoiceNumber));
 });
 
 test("forgot password: OTP to registered mobile, attempt limit, old sessions revoked", async () => {

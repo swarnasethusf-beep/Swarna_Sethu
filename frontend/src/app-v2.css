@@ -208,3 +208,84 @@
   .invoice-bottom, .two-col { grid-template-columns: 1fr; }
   .summary-grid.four { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* ── Barcode generator & scan boxes ─────────────────────────────────────── */
+.scan-box { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.scan-box input { flex: 1; min-width: 280px; padding: 11px 14px; border: 2px dashed #b8860b; border-radius: 10px; font-family: inherit; font-size: 0.95rem; background: #fffdf5; }
+.scan-box input:focus { outline: none; border-style: solid; }
+.scan-msg { font-size: 0.85rem; font-weight: 600; }
+.scan-msg.success { color: var(--ok); }
+.scan-msg.error { color: #c0392b; }
+.scan-msg.warn { color: var(--warn); }
+.label-grid { display: flex; flex-wrap: wrap; gap: 14px; }
+.label-card { border: 1px solid var(--line); border-radius: 10px; padding: 10px; background: #fafafa; }
+.label-preview { background: #fff; border: 1px solid #ccc; display: inline-block; box-shadow: 0 1px 4px rgba(0,0,0,.12); }
+.label-meta { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; font-size: 0.8rem; font-weight: 600; }
+.label-meta input { width: 64px; margin-left: 6px; padding: 5px; border: 1px solid #dcdfe3; border-radius: 6px; }
+
+/* ── Notifications, work orders, goldsmith screen ───────────────────────── */
+.nav-badge { margin-left: auto; background: #e74c3c; color: #fff; border-radius: 10px; padding: 1px 8px; font-size: 0.72rem; font-weight: 700; }
+.toast-stack { position: fixed; right: 20px; bottom: 20px; z-index: 9000; display: flex; flex-direction: column; gap: 10px; max-width: 360px; }
+.toast { background: #222; color: #fff; padding: 14px 16px; border-radius: 12px; box-shadow: 0 8px 28px rgba(0,0,0,0.3); cursor: pointer; font-size: 0.88rem; border-left: 5px solid #ffd700; animation: toast-in .25s ease-out; }
+.toast div { color: #ccc; margin-top: 3px; }
+@keyframes toast-in { from { transform: translateY(14px); opacity: 0; } to { transform: none; opacity: 1; } }
+.notif-row { display: flex; align-items: center; gap: 14px; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+.notif-row.clickable { cursor: pointer; }
+.notif-row.clickable:hover { background: #fffbea; }
+.notif-row.unread { background: #fff8e1; }
+.notif-dot { width: 9px; height: 9px; border-radius: 50%; background: transparent; flex-shrink: 0; }
+.notif-row.unread .notif-dot { background: #e74c3c; }
+.notif-title { font-weight: 600; }
+.chip-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.chip { padding: 7px 14px; border-radius: 20px; border: 1px solid #ddd; background: #fff; cursor: pointer; font-family: inherit; font-weight: 600; font-size: 0.82rem; color: #555; }
+.chip.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+.chip.alert-chip:not(.active) { border-color: #f39c12; color: #9c640c; background: #fef5e7; }
+.chip.danger-chip:not(.active) { border-color: #e74c3c; color: #c0392b; background: #fdecea; }
+.clickable-row { cursor: pointer; }
+.clickable-row:hover { background: #fffbea; }
+.detail-row > td { background: #fafafa; padding: 0 !important; }
+.work-detail { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; padding: 18px 22px; }
+.work-detail h4 { margin: 0 0 8px; }
+.work-actions { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.work-actions textarea { padding: 8px; border: 1px solid #dcdfe3; border-radius: 8px; font-family: inherit; }
+.timeline { list-style: none; margin: 0; padding: 0 0 0 14px; border-left: 2px solid var(--line); }
+.timeline li { position: relative; padding: 0 0 12px 14px; }
+.timeline li::before { content: ""; position: absolute; left: -22px; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--primary); }
+.timeline .note { font-style: italic; color: #555; margin-top: 2px; }
+.text-danger { color: #c0392b; font-weight: 700; }
+.group-title { font-size: 1rem; margin: 22px 0 10px; color: #555; }
+.work-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+.work-card { background: #fff; border: 1px solid var(--line); border-left: 6px solid #3498db; border-radius: 14px; padding: 18px 20px; box-shadow: 0 2px 12px rgba(0,0,0,0.04); }
+.work-card.urgent { border-left-color: #e74c3c; }
+.work-card.late { background: #fffafa; }
+.work-card h3 { margin: 10px 0 6px; font-size: 1.1rem; }
+.work-card-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.work-text { margin: 8px 0; color: #444; white-space: pre-wrap; }
+.work-facts { display: flex; gap: 16px; flex-wrap: wrap; margin: 10px 0 14px; font-size: 0.9rem; }
+.btn.big { padding: 14px 26px; font-size: 1.05rem; }
+.complete-box { background: #f6f9fc; border-radius: 10px; padding: 14px; margin-top: 8px; }
+.work-card details { margin-top: 12px; font-size: 0.85rem; }
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; z-index: 8000; }
+.modal { background: #fff; border-radius: 16px; padding: 24px 26px; width: min(440px, 92vw); box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
+.modal h3 { margin: 0 0 6px; }
+.login-hint { font-size: 0.8rem; color: #888; margin: 14px 0 0; }
+@media (max-width: 800px) { .work-detail { grid-template-columns: 1fr; } .main-view { padding: 20px 14px; } }
+
+/* ── Job work: dashboard strip, settlement ──────────────────────────────── */
+.hidden { display: none !important; }
+.jobwork-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 18px; }
+.jw-card { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; text-align: left; display: flex; flex-direction: column; gap: 2px; font-family: inherit; cursor: pointer; }
+.jw-card.plain { cursor: default; }
+.jw-card:not(.plain):hover { border-color: var(--primary); }
+.jw-card.ready { background: #fffbea; border-color: #f1c40f; }
+.jw-card span { font-weight: 600; font-size: 0.85rem; color: #555; }
+.jw-card strong { font-size: 1.6rem; }
+.jw-card small { color: var(--muted); }
+.received-box { background: #f6f9fc; border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+@media (max-width: 800px) { .jobwork-strip { grid-template-columns: 1fr; } }
+
+/* ── Job order form ───────────────────────────────────────────────────────── */
+.job-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.sub-title { margin: 22px 0 8px; font-size: 0.95rem; }
+.order-total { display: flex; justify-content: space-between; align-items: center; background: #f6f9fc; border-radius: 10px; padding: 12px 16px; margin-top: 12px; font-weight: 600; }
+.order-total strong { font-size: 1.3rem; }

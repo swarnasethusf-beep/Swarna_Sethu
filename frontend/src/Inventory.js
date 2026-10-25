@@ -1,12 +1,8 @@
 import React, { useState, useEffect, useCallback } from "react";
 import api, { errMsg } from "./api";
-import { PURITIES, MAKING_TYPES } from "./shared/billing";
 import { inr, grams } from "./format";
-
-const EMPTY = {
-  itemCode: "", description: "", purity: "22K", huid: "", hsn: "7113", pcs: 1,
-  grossWt: "", stoneWt: "", wastagePct: "", makingType: "per_gram", makingValue: "", stoneCharges: ""
-};
+import { EMPTY_PRODUCT as EMPTY, ProductFields, productToForm } from "./ProductForm";
+import { normalizeScan } from "./barcode";
 
 /**
  * 📦 Inventory — one record per tagged piece. Billing looks pieces up by item code
@@ -20,6 +16,7 @@ function Inventory({ userRole, showCreatedBy }) {
   const [editingId, setEditingId] = useState(null);
   const [msg, setMsg] = useState({ text: "", type: "" });
   const [busy, setBusy] = useState(false);
+  const [scan, setScan] = useState("");
 
   const load = useCallback(() => {
     api.get("/products", { params: { status: status === "all" ? undefined : status } })
@@ -28,15 +25,14 @@ function Inventory({ userRole, showCreatedBy }) {
   }, [status]);
   useEffect(load, [load]);
 
-  const f = (k) => ({ value: form[k], onChange: (e) => setForm({ ...form, [k]: e.target.value }) });
-
   const submit = async (e) => {
     e.preventDefault();
     setBusy(true); setMsg({ text: "", type: "" });
     try {
+      let code = form.itemCode;
       if (editingId) await api.put(`/products/${editingId}`, form);
-      else await api.post("/products", form);
-      setMsg({ text: `✅ ${form.itemCode} ${editingId ? "updated" : "added to stock"}.`, type: "success" });
+      else code = (await api.post("/products", form)).data.itemCode;
+      setMsg({ text: `✅ ${code} ${editingId ? "updated" : "added to stock"}.`, type: "success" });
       setForm(EMPTY);
       setEditingId(null);
       load();
@@ -49,8 +45,29 @@ function Inventory({ userRole, showCreatedBy }) {
 
   const edit = (p) => {
     setEditingId(p.id);
-    setForm({ ...EMPTY, ...Object.fromEntries(Object.keys(EMPTY).map((k) => [k, p[k] ?? EMPTY[k]])) });
+    setForm(productToForm(p));
     window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  // A scanned barcode (or a typed code + Enter) loads that piece into the form, filled in
+  const loadByCode = async (raw) => {
+    const code = normalizeScan(raw);
+    if (!code) return;
+    setMsg({ text: "", type: "" });
+    try {
+      const { data: p } = await api.get(`/products/by-code/${encodeURIComponent(code)}`);
+      if ((p.status || "in_stock") !== "in_stock") {
+        setMsg({ text: `${p.itemCode} was sold${p.soldInvoiceNumber ? ` on ${p.soldInvoiceNumber}` : ""}.`, type: "warn" });
+        setScan("");
+        return;
+      }
+      edit(p);
+      setScan("");
+      setMsg({ text: `✔ ${p.itemCode} loaded — change anything and click Update.`, type: "success" });
+    } catch (err) {
+      setMsg({ text: errMsg(err, "Scan failed."), type: "error" });
+      setScan("");
+    }
   };
 
   const remove = async (p) => {
@@ -65,7 +82,6 @@ function Inventory({ userRole, showCreatedBy }) {
 
   const shown = list.filter((p) => !q || `${p.itemCode} ${p.description} ${p.huid || ""}`.toLowerCase().includes(q.toLowerCase()));
   const totalNet = shown.reduce((s, p) => s + (p.netWt || 0), 0);
-  const net = Math.max(0, (parseFloat(form.grossWt) || 0) - (parseFloat(form.stoneWt) || 0));
 
   return (
     <div>
@@ -78,25 +94,17 @@ function Inventory({ userRole, showCreatedBy }) {
 
       <form className="card section" onSubmit={submit}>
         <h3>{editingId ? `Edit ${form.itemCode}` : "Add piece to stock"}</h3>
-        <div className="form-grid cols-4">
-          <label className="field">Item code *<input {...f("itemCode")} onChange={(e) => setForm({ ...form, itemCode: e.target.value.toUpperCase() })} required /></label>
-          <label className="field span-2">Description *<input {...f("description")} required /></label>
-          <label className="field">Purity
-            <select {...f("purity")}>{Object.entries(PURITIES).map(([k, p]) => <option key={k} value={k}>{p.label}</option>)}</select>
-          </label>
-          <label className="field">Gross wt (g) *<input type="number" min="0" step="0.001" {...f("grossWt")} required /></label>
-          <label className="field">Stone wt (g)<input type="number" min="0" step="0.001" {...f("stoneWt")} /></label>
-          <label className="field">Net wt (g)<input value={net.toFixed(3)} readOnly className="readonly" /></label>
-          <label className="field">Wastage / VA %<input type="number" min="0" step="0.01" {...f("wastagePct")} /></label>
-          <label className="field">Making charge<input type="number" min="0" step="0.01" {...f("makingValue")} /></label>
-          <label className="field">Making type
-            <select {...f("makingType")}>{Object.entries(MAKING_TYPES).map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
-          </label>
-          <label className="field">Stone charges (₹)<input type="number" min="0" step="0.01" {...f("stoneCharges")} /></label>
-          <label className="field">HUID (hallmark)<input {...f("huid")} maxLength={6} onChange={(e) => setForm({ ...form, huid: e.target.value.toUpperCase() })} /></label>
-          <label className="field">HSN<input {...f("hsn")} maxLength={8} /></label>
-          <label className="field">Pieces<input type="number" min="1" step="1" {...f("pcs")} /></label>
+        <div className="field" style={{ marginBottom: 14 }}>
+          <label>📷 Scan barcode to load an item</label>
+          <input
+            placeholder="Click here, then scan a label (or type a code and press Enter)"
+            value={scan}
+            autoComplete="off"
+            onChange={(e) => setScan(e.target.value.toUpperCase())}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); loadByCode(scan); } }}
+          />
         </div>
+        <ProductFields form={form} setForm={setForm} codeOptional onCodeEnter={loadByCode} codeHint={editingId ? "" : "Scan an existing label here to edit it"} />
         <div className="btn-group">
           <button type="submit" className="btn btn-primary" disabled={busy}>{editingId ? "💾 Update item" : "➕ Add to stock"}</button>
           {editingId && <button type="button" className="btn btn-secondary" onClick={() => { setEditingId(null); setForm(EMPTY); }}>Cancel edit</button>}

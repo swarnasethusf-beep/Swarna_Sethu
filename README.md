@@ -79,3 +79,20 @@ Notes
 
 The Windows app (`cd frontend && npm run dist`) should talk to the same central backend: set `REACT_APP_API_URL` in `frontend/.env`
 before building. Do not install the backend or the Firebase service-account key on shop PCs.
+
+## Goldsmith logins & work orders
+
+- **Give a login:** Staff → *🔑 Give login* next to a staff member (owner only). They sign in with the shop's license key, their username and password, and see only **My Work** and **Notifications** — no billing, stock, customers or rates.
+- **Assign work:** *Work Orders → New work order*, or choose a goldsmith who has a 🔔 on an invoice and a work order is created automatically.
+- **Flow:** Assigned → In progress → Completed (goldsmith, with finished weight) → Verified & closed, or sent back with a note (owner). Each step notifies the other side; the apps refresh every ~20 s.
+- **Permissions:** Admin Management now has *Barcode* and *Work Orders* switches next to Invoice / Inventory / Staff / Reports.
+
+## Job work for a customer's gold (two phases)
+
+**Phase 1 — the order** (Invoices → New Invoice → *Job Work*): one card with what is to be made (description, purity dropdown) and the customer's gold received; the advance in its own card. It gets an invoice number and an automatic **job code** (`JW00001…`; stock items use `SS00001…`). There is no bill yet and no HUID, wastage, making or stones. The printout is an *order receipt*.
+
+**The work:** the goldsmith starts and completes it in *My Work*, entering the **finished weight and the wastage**. The invoice becomes **Ready for pickup** and the owner is told to call the customer.
+
+**Phase 2 — pickup** (Invoices → *Unfinished job work* → open → **Finalize & deliver**): the goldsmith's weight and wastage are pre-filled; add the HUID, making and stone charges. The bill is prepared under the same number and the advance is deducted.
+
+**What the bill charges:** the customer's own gold is only *weighed* — never priced or paid for. The bill is the **new gold the shop adds** (needed net fine − his fine, 24K rate, 3% GST) + **making + stones + wastage** (job work, 5% GST). If he gave more gold than needed, the surplus is returned in grams. Pending job work isn't counted as a sale (dashboard, reports, GST) until delivered. *Receive payment / Add advance* works on any invoice.

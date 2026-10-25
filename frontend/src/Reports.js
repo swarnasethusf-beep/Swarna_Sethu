@@ -48,6 +48,12 @@ function Reports({ onOpenInvoice }) {
 
       {t && (
         <>
+          {t.pendingJobWork?.count > 0 && (
+            <div className="alert warn">
+              ⏳ {t.pendingJobWork.count} job-work order{t.pendingJobWork.count === 1 ? " is" : "s are"} not delivered yet (advance held {inr(t.pendingJobWork.advance)}).
+              They are <strong>not</strong> included below — they count as sales, and GST, once delivered.
+            </div>
+          )}
           <div className="summary-grid four">
             <div className="summary-card"><span>Invoices</span><h2>{t.count}</h2><small>{t.sales} sale · {t.jobWork} job work · {t.cancelled} cancelled</small></div>
             <div className="summary-card"><span>Taxable value</span><h2>{inr(t.taxable)}</h2></div>
@@ -94,7 +100,7 @@ function Reports({ onOpenInvoice }) {
                     <td>{i.invoiceNumber}</td><td>{displayDate(i.date)}</td><td>{i.customerName}</td>
                     <td className="right">{inr(i.taxable)}</td><td className="right">{inr(i.cgst + i.sgst + i.igst)}</td>
                     <td className="right">{inr(i.credit)}</td><td className="right strong">{inr(i.payable)}</td>
-                    <td>{i.status === "cancelled" ? <span className="pill danger">Cancelled</span> : <span className="pill ok">Active</span>}</td>
+                    <td>{i.status === "cancelled" ? <span className="pill danger">Cancelled</span> : ["pending", "ready"].includes(i.fulfilmentStatus) ? <span className="pill warn">⏳ Not delivered</span> : <span className="pill ok">Active</span>}</td>
                   </tr>
                 ))}
               </tbody>

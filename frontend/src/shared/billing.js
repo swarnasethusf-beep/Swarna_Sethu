@@ -80,12 +80,19 @@ function computeItem(raw, rates, mode) {
   const stoneMg = Math.min(grossMg, Math.max(0, toMg(raw.stoneWt)));
   const netMg = grossMg - stoneMg;
   const wastagePct = Math.max(0, num(raw.wastagePct));
-  const effectiveMg = Math.round(netMg * (1 + wastagePct / 100)); // gold charged incl. wastage (VA)
-  const fineMg = Math.round(effectiveMg * finenessOf(purity));
+  // Wastage is either a % of the net weight (shop's rate) or the actual grams lost, as told by the goldsmith
+  const gramsGiven = raw.wastageGrams !== "" && raw.wastageGrams != null && Number.isFinite(parseFloat(raw.wastageGrams)) && parseFloat(raw.wastageGrams) >= 0;
+  const wasteMg = gramsGiven ? toMg(raw.wastageGrams) : Math.round(netMg * wastagePct / 100);
+  const effectiveMg = netMg + wasteMg; // net + wastage (VA)
+  // Sale: wastage is extra gold on the bill.
+  // JOB WORK: the gold needed is the NET weight, and wastage is a separate MONEY charge (below).
+  // The customer's own gold is only weighed — it is never priced or deducted as money.
+  const fineMg = Math.round((mode === "job_work" ? netMg : effectiveMg) * finenessOf(purity));
 
-  const ratePaise = toPaise(raw.rate != null && raw.rate !== "" ? raw.rate : rates[purity]);
+  const ratePaise = toPaise(num(raw.rate) > 0 ? raw.rate : rates[purity])   // a blank or zero row rate means "use the purity rate";
   // In job work the gold is settled in fine weight, so gold value isn't billed per item.
   const goldPaise = mode === "job_work" ? 0 : valueOf(effectiveMg, ratePaise);
+  const wastagePaise = mode === "job_work" ? valueOf(wasteMg, ratePaise) : 0;   // wastage grams × the purity rate
 
   const makingType = MAKING_TYPES[raw.makingType] ? raw.makingType : "per_gram";
   let makingPaise;
@@ -95,7 +102,7 @@ function computeItem(raw, rates, mode) {
   makingPaise = Math.max(0, makingPaise);
 
   const stonePaise = Math.max(0, toPaise(raw.stoneCharges));
-  const linePaise = goldPaise + makingPaise + stonePaise;
+  const linePaise = goldPaise + makingPaise + stonePaise + wastagePaise;
 
   return {
     productId: raw.productId || null,
@@ -108,8 +115,11 @@ function computeItem(raw, rates, mode) {
     grossWt: mgToG(grossMg),
     stoneWt: mgToG(stoneMg),
     netWt: mgToG(netMg),
-    wastagePct,
+    wastagePct: gramsGiven && netMg > 0 ? Math.round((wasteMg / netMg) * 10000) / 100 : wastagePct,
     effectiveWt: mgToG(effectiveMg),
+    wastageWt: mgToG(wasteMg),
+    wastageGrams: gramsGiven ? mgToG(wasteMg) : "",
+    wastageAmount: paiseToRs(wastagePaise),
     fineWt: mgToG(fineMg),
     rate: paiseToRs(ratePaise),
     makingType,
@@ -118,7 +128,7 @@ function computeItem(raw, rates, mode) {
     makingAmount: paiseToRs(makingPaise),
     stoneCharges: paiseToRs(stonePaise),
     lineTotal: paiseToRs(linePaise),
-    _p: { fineMg, goldPaise, makingPaise, stonePaise, linePaise, netMg }
+    _p: { fineMg, goldPaise, makingPaise, stonePaise, wastagePaise, linePaise, netMg }
   };
 }
 
@@ -176,7 +186,7 @@ function computeInvoice(input, shop = {}) {
     .map((r) => computeItem(r, rates, mode));
   const oldGold = (input.oldGold || [])
     .filter((r) => r && num(r.grossWt) > 0)
-    .map((r) => computeOldGold(r, rate24Paise));
+    .map((r) => computeOldGold(r, mode === "job_work" ? 0 : rate24Paise));   // job work: the customer's gold is weighed, never priced
 
   const sum = (arr, f) => arr.reduce((s, x) => s + f(x), 0);
   const itemsFineMg = sum(items, (i) => i._p.fineMg);
@@ -184,6 +194,7 @@ function computeInvoice(input, shop = {}) {
   const goldPaise = sum(items, (i) => i._p.goldPaise);
   const makingPaise = sum(items, (i) => i._p.makingPaise);
   const stonePaise = sum(items, (i) => i._p.stonePaise);
+  const wastagePaise = sum(items, (i) => i._p.wastagePaise);
   const oldGoldPaise = sum(oldGold, (o) => o._p.valuePaise);
 
   const taxLines = [];
@@ -199,8 +210,8 @@ function computeInvoice(input, shop = {}) {
     excessFineMg = Math.max(0, oldFineMg - itemsFineMg);
     const addedGoldPaise = valueOf(addedFineMg, rate24Paise);
     if (addedGoldPaise > 0) taxLines.push(taxLine("Fine gold supplied", "7108", addedGoldPaise, GST_RATE_GOLD, intraState));
-    taxLines.push(taxLine("Job work charges", "9988", makingPaise + stonePaise, GST_RATE_JOB_WORK, intraState));
-    creditPaise = valueOf(excessFineMg, rate24Paise);
+    taxLines.push(taxLine("Job work charges", "9988", makingPaise + stonePaise + wastagePaise, GST_RATE_JOB_WORK, intraState));
+    creditPaise = 0;   // surplus customer gold goes back as gold (summary.excessFineWt), never as money
   }
 
   const taxablePaise = sum(taxLines, (t) => t.taxablePaise);
@@ -233,7 +244,7 @@ function computeInvoice(input, shop = {}) {
     const n = `Item ${i + 1}`;
     if (!it.description) err("ITEM_DESC", `${n}: description is required.`);
     if (it._p.netMg <= 0) err("ITEM_WEIGHT", `${n}: net weight must be greater than 0.`);
-    if (mode === "sale" && it.rate <= 0) err("ITEM_RATE", `${n}: no rate set for ${it.purity}.`);
+    if ((mode === "sale" || it.wastagePct > 0) && it.rate <= 0) err("ITEM_RATE", `${n}: no rate set for ${it.purity}.`);
     if (it.huid && !HUID_RE.test(it.huid)) err("ITEM_HUID", `${n}: HUID must be 6 letters/digits.`);
   });
   if ((oldGold.length > 0 || mode === "job_work") && rate24Paise <= 0)
@@ -272,8 +283,9 @@ function computeInvoice(input, shop = {}) {
       excessFineWt: mgToG(excessFineMg),
       goldValue: paiseToRs(goldPaise),
       makingTotal: paiseToRs(makingPaise),
+      wastageTotal: paiseToRs(wastagePaise),
       stoneTotal: paiseToRs(stonePaise),
-      oldGoldValue: paiseToRs(oldGoldPaise),
+      oldGoldValue: paiseToRs(mode === "job_work" ? 0 : oldGoldPaise),
       taxLines: taxLines.map((t) => ({
         label: t.label, hsn: t.hsn, ratePct: t.ratePct,
         taxable: paiseToRs(t.taxablePaise),
@@ -291,6 +303,47 @@ function computeInvoice(input, shop = {}) {
       payable: payableRs,
       paid: paiseToRs(paidPaise),
       balance: paiseToRs(roundedPaise - paidPaise)
+    },
+    issues
+  };
+}
+
+/**
+ * Phase 1 of a job-work order: the customer's gold is weighed and an advance may be taken.
+ * There is no bill yet — weights, wastage, making, stones and tax are decided after the work is done
+ * (then computeInvoice runs on the finished figures).
+ */
+function computeOrder(input) {
+  const oldGold = (input.oldGold || []).filter((r) => r && num(r.grossWt) > 0).map((r) => computeOldGold(r, 0));
+  const oldFineMg = oldGold.reduce((n, o) => n + o._p.fineMg, 0);
+  const oldNetMg = oldGold.reduce((n, o) => n + toMg(o.netWt), 0);
+
+  const payments = (input.payments || [])
+    .filter((p) => p && toPaise(p.amount) > 0)
+    .map((p) => ({ mode: PAYMENT_MODES.includes(p.mode) ? p.mode : "Cash", amount: paiseToRs(toPaise(p.amount)), reference: String(p.reference || "").trim() }));
+  const paidPaise = payments.reduce((n, p) => n + toPaise(p.amount), 0);
+  const cashPaise = payments.filter((p) => p.mode === "Cash").reduce((n, p) => n + toPaise(p.amount), 0);
+
+  const issues = [];
+  const err = (code, message) => issues.push({ level: "error", code, message });
+  if (!String(input.description || "").trim()) err("ORDER_DESC", "Describe what is to be made.");
+  if (!PURITIES[input.purity]) err("ORDER_PURITY", "Choose the purity.");
+  if (paiseToRs(cashPaise) >= CASH_LIMIT) err("CASH_LIMIT", `Cash of ₹${CASH_LIMIT.toLocaleString("en-IN")} or more cannot be accepted (Sec 269ST).`);
+  oldGold.forEach((o, i) => { if (o.touch <= 0) err("OLD_TOUCH", `Customer gold ${i + 1}: enter the purity (touch) %.`); });
+
+  const strip = ({ _p, ...rest }) => rest;
+  const zero = 0;
+  return {
+    oldGold: oldGold.map(strip),
+    payments,
+    summary: {
+      itemsNetWt: zero, itemsFineWt: zero,
+      oldGoldNetWt: mgToG(oldNetMg), oldGoldFineWt: mgToG(oldFineMg),
+      addedFineWt: zero, excessFineWt: zero,
+      goldValue: zero, makingTotal: zero, wastageTotal: zero, stoneTotal: zero, oldGoldValue: zero,
+      taxLines: [], taxable: zero, cgst: zero, sgst: zero, igst: zero, tax: zero,
+      invoiceTotal: zero, credit: zero, creditLabel: "", roundOff: zero,
+      payable: zero, paid: paiseToRs(paidPaise), balance: zero
     },
     issues
   };
@@ -343,5 +396,5 @@ module.exports = {
   GST_RATE_GOLD, GST_RATE_JOB_WORK, PAN_THRESHOLD, CASH_LIMIT,
   PURITIES, MAKING_TYPES, PAYMENT_MODES, STATES,
   GSTIN_RE, PAN_RE, HUID_RE,
-  computeInvoice, amountInWords, financialYear, formatInvoiceNumber
+  computeInvoice, computeOrder, amountInWords, financialYear, formatInvoiceNumber
 };

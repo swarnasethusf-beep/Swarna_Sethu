@@ -2,6 +2,7 @@ const express = require("express");
 const bcrypt = require("bcrypt");
 const { hashKeyForLookup, normalizeLicenseKey, generateOtp, safeEqual } = require("../lib/security");
 const { HttpError, bad, str, mobile10, maskMobile, serialize } = require("../lib/util");
+const { permissionsFor } = require("../lib/perms");
 
 const SALT_ROUNDS = 10;
 const MIN_PASSWORD = 8;
@@ -111,9 +112,7 @@ module.exports = function authRoutes(deps) {
     const token = deps.issueShopToken(licDoc.id, userDoc.id, user.tokenVersion || 0);
     const ctx = {
       licenseDocId: licDoc.id, userId: userDoc.id, name: user.name, username: user.username, role: user.role,
-      permissions: user.role === "super_admin"
-        ? { invoice: true, inventory: true, staff: true, reports: true }
-        : { invoice: false, inventory: false, staff: false, reports: false, ...(user.permissions || {}) }
+      permissions: permissionsFor(user.role, user.permissions)
     };
     res.send({ token, ...sessionPayload(ctx, lic) });
   });
