@@ -4,7 +4,7 @@ const { HttpError, bad, str, number, mobile10, todayIST, docOut, serialize } = r
 const { PURITIES, STATES, GSTIN_RE } = require("../lib/billing");
 const { shopProfile, validatePassword, SALT_ROUNDS } = require("./auth");
 
-const MODULES = ["invoice", "inventory", "staff", "reports"];
+const { MODULES } = require("../lib/perms");
 const LIVE_RATE_CACHE_MS = 5 * 60 * 1000;
 
 module.exports = function shopRoutes(deps) {
@@ -12,7 +12,7 @@ module.exports = function shopRoutes(deps) {
   const router = express.Router();
 
   // ── Settings: shop profile (printed on invoices) + display settings ─────
-  router.get("/settings", mw.auth, async (req, res) => {
+  router.get("/settings", mw.auth, mw.office, async (req, res) => {
     const lic = (await req.ctx.licenseRef.get()).data();
     res.send({
       shop: shopProfile(lic),
@@ -50,7 +50,7 @@ module.exports = function shopRoutes(deps) {
   });
 
   // ── Daily metal rates (₹ per gram) ──────────────────────────────────────
-  router.get("/rates", mw.auth, async (req, res) => {
+  router.get("/rates", mw.auth, mw.office, async (req, res) => {
     const lic = (await req.ctx.licenseRef.get()).data();
     res.send(serialize(lic.rates || {}));
   });
@@ -65,7 +65,7 @@ module.exports = function shopRoutes(deps) {
   });
 
   let liveCache = null;
-  router.get("/rates/live", mw.auth, async (req, res) => {
+  router.get("/rates/live", mw.auth, mw.office, async (req, res) => {
     if (!deps.fetchGold24k) return res.send({ available: false, message: "Live rates are not configured (set GOLDAPI_KEY)." });
     if (!liveCache || liveCache.expires < Date.now()) {
       try {
@@ -163,7 +163,7 @@ module.exports = function shopRoutes(deps) {
   });
 
   // ── Dashboard ───────────────────────────────────────────────────────────
-  router.get("/dashboard", mw.auth, async (req, res) => {
+  router.get("/dashboard", mw.auth, mw.office, async (req, res) => {
     const ctx = req.ctx;
     const today = todayIST();
     const monthStart = today.slice(0, 8) + "01";
@@ -174,7 +174,8 @@ module.exports = function shopRoutes(deps) {
 
     if (can(ctx, "invoice") || can(ctx, "reports")) {
       const snap = await ctx.licenseRef.collection("invoices").where("date", ">=", monthStart).get();
-      let invs = snap.docs.map(docOut).filter((i) => i.status !== "cancelled");
+      // unfinished job work isn't a completed sale yet — it is shown separately below
+      let invs = snap.docs.map(docOut).filter((i) => i.status !== "cancelled" && !["pending", "ready"].includes(i.fulfilmentStatus));
       if (!can(ctx, "reports")) invs = invs.filter((i) => i.createdBy === ctx.userId); // own figures only
       const total = (list) => Math.round(list.reduce((s, i) => s + (i.summary?.payable || 0), 0) * 100) / 100;
       const todays = invs.filter((i) => i.date === today);
@@ -189,6 +190,13 @@ module.exports = function shopRoutes(deps) {
           .sort((a, b) => (b.date + String(b.seq).padStart(8, "0")).localeCompare(a.date + String(a.seq).padStart(8, "0")))
           .slice(0, 6)
           .map((i) => ({ id: i.id, invoiceNumber: i.invoiceNumber, date: i.date, customerName: i.customer?.name, payable: i.summary?.payable, mode: i.mode }))
+      };
+      const open = (await Promise.all(["pending", "ready"].map(async (s) => (await ctx.licenseRef.collection("invoices").where("fulfilmentStatus", "==", s).get()).docs.map(docOut))))
+        .flat().filter((i) => i.status !== "cancelled");
+      out.jobWork = {
+        pending: open.filter((i) => i.fulfilmentStatus === "pending").length,
+        ready: open.filter((i) => i.fulfilmentStatus === "ready").length,
+        advance: Math.round(open.reduce((s, i) => s + (i.summary?.paid || 0), 0) * 100) / 100
       };
     }
     if (can(ctx, "inventory") || can(ctx, "invoice")) {

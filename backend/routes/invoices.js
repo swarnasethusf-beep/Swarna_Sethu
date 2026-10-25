@@ -2,6 +2,7 @@ const express = require("express");
 const { HttpError, bad, str, mobile10, isoDate, todayIST, docOut, serialize } = require("../lib/util");
 const { computeInvoice, financialYear, formatInvoiceNumber, STATES } = require("../lib/billing");
 const { shopProfile } = require("./auth");
+const { createWorkOrder, goldsmithUserFor, cancelWorkForInvoice } = require("../lib/work");
 
 const MAX_RANGE_DAYS = 400;
 
@@ -11,6 +12,19 @@ function readCustomer(c = {}) {
   return {
     name: str(c.name, { required: true, field: "Customer name", max: 120 }),
     mobile: mobile10(c.mobile, { field: "Customer mobile" }),
+    address: str(c.address, { max: 400 }),
+    stateCode,
+    gstin: str(c.gstin, { max: 15 }).toUpperCase(),
+    pan: str(c.pan, { max: 10 }).toUpperCase()
+  };
+}
+
+function readSecretCustomer(c = {}) {
+  const stateCode = str(c.stateCode, { max: 2 });
+  if (stateCode && !STATES.some((s) => s.code === stateCode)) throw bad("Select a valid customer state.");
+  return {
+    name: str(c.name, { max: 120 }) || "Cash Customer",
+    mobile: mobile10(c.mobile, { required: false, field: "Customer mobile" }),
     address: str(c.address, { max: 400 }),
     stateCode,
     gstin: str(c.gstin, { max: 15 }).toUpperCase(),
@@ -84,6 +98,7 @@ module.exports = function invoiceRoutes(deps) {
         fy,
         date,
         status: "active",
+        fulfilmentStatus: result.mode === "job_work" ? "pending" : null,   // pending → ready → delivered
         mode: result.mode,
         shop,
         customer: { ...customer, stateCode: result.customerStateCode },
@@ -117,17 +132,134 @@ module.exports = function invoiceRoutes(deps) {
       return invoice;
     });
 
-    res.send(serialize({ id: invoiceRef.id, ...created }));
+    // A goldsmith with a login gets a work order for this bill (best effort — never fails the invoice)
+    let workOrder = null;
+    if (created.assignedStaffId) {
+      try {
+        if (await goldsmithUserFor(ctx.licenseRef, created.assignedStaffId)) {
+          const gold = (created.oldGold || []).reduce((n, o) => n + (o.netWt || 0), 0);
+          const out = await createWorkOrder({
+            db, licenseRef: ctx.licenseRef, actor: { userId: ctx.userId, name: ctx.name },
+            data: {
+              staffId: created.assignedStaffId,
+              title: created.items.map((i) => i.description).filter(Boolean).join(", ").slice(0, 140) || `Invoice ${created.invoiceNumber}`,
+              details: created.mode === "job_work"
+                ? `Job work. Customer gold: ${created.summary.oldGoldFineWt.toFixed(3)} g fine; needed: ${created.summary.itemsFineWt.toFixed(3)} g fine.`
+                : "",
+              itemCode: created.items.map((i) => i.itemCode).filter(Boolean).join(", ").slice(0, 30),
+              reference: created.invoiceNumber, invoiceId: invoiceRef.id,
+              issuedWt: Math.round(gold * 1000) / 1000
+            }
+          });
+          workOrder = { id: out.id, orderNo: out.order.orderNo };
+          await invoiceRef.update({ workOrderId: out.id, workOrderNo: out.order.orderNo, workStatus: "assigned" });
+        }
+      } catch (err) {
+        console.error("Work order for invoice failed:", err.message);
+      }
+    }
+    res.send(serialize({
+      id: invoiceRef.id, ...created, workOrder,
+      ...(workOrder ? { workOrderId: workOrder.id, workOrderNo: workOrder.orderNo, workStatus: "assigned" } : {})   // same fields the stored invoice now has
+    }));
+  });
+
+  // ── Secret / Direct Sale (Unrecorded: no invoice log saved, stock items permanently removed) ──
+  router.post("/invoices/secret-sale", mw.auth, mw.perm("invoice"), async (req, res) => {
+    const ctx = req.ctx;
+    const b = req.body;
+    const customer = readSecretCustomer(b.customer);
+    const assignedStaffId = str(b.assignedStaffId, { max: 64 });
+    const notes = str(b.notes, { max: 1000 });
+    if ((b.items || []).length > 100 || (b.oldGold || []).length > 50 || (b.payments || []).length > 20)
+      throw bad("Too many lines on one invoice.");
+
+    const date = todayIST();
+    const fy = financialYear(date);
+
+    const created = await db.runTransaction(async (t) => {
+      // Reads first (Firestore transactions require reads before writes)
+      const licDoc = await t.get(ctx.licenseRef);
+      const shop = shopProfile(licDoc.data());
+      const result = computeInvoice({ ...b, customer }, shop);
+      const errors = result.issues.filter((i) => i.level === "error" && i.code !== "PAN_REQUIRED");
+      if (errors.length) throw bad(errors[0].message, errors);
+
+      const staffDoc = assignedStaffId ? await t.get(ctx.licenseRef.collection("staff").doc(assignedStaffId)) : null;
+      if (staffDoc && !staffDoc.exists) throw bad("Assigned staff member not found.");
+
+      const productIds = [...new Set(result.items.map((i) => i.productId).filter(Boolean).map(String))];
+      if (productIds.length !== result.items.filter((i) => i.productId).length)
+        throw bad("The same stock item is on the bill twice.");
+
+      const productDocs = [];
+      for (const id of productIds) productDocs.push(await t.get(ctx.licenseRef.collection("products").doc(id)));
+
+      for (const p of productDocs) {
+        if (!p.exists) throw bad("An item on this bill no longer exists in inventory.");
+        if ((p.data().status || "in_stock") !== "in_stock")
+          throw new HttpError(409, `Item ${p.data().itemCode} is already sold.`);
+      }
+
+      // PERMANENTLY REMOVE PRODUCTS FROM FIREBASE
+      for (const p of productDocs) {
+        t.delete(p.ref);
+      }
+
+      // DO NOT SAVE INVOICE RECORD TO INVOICES COLLECTION
+      // DO NOT INCREMENT COUNTER
+      // DO NOT UPDATE CUSTOMER COLLECTION
+
+      const secretInvoiceNumber = "EST-" + Date.now().toString().slice(-6);
+      const invoice = {
+        invoiceNumber: secretInvoiceNumber,
+        seq: 0,
+        fy,
+        date,
+        status: "active",
+        mode: result.mode,
+        shop,
+        customer: { ...customer, stateCode: result.customerStateCode },
+        intraState: result.intraState,
+        rates: result.rates,
+        items: result.items,
+        oldGold: result.oldGold,
+        payments: result.payments,
+        summary: result.summary,
+        warnings: result.issues.filter((i) => i.level === "warning").map((i) => i.message),
+        assignedStaffId: staffDoc ? staffDoc.id : "",
+        assignedStaffName: staffDoc ? staffDoc.data().fullName : "",
+        notes,
+        createdBy: ctx.userId,
+        createdByName: ctx.name,
+        createdAt: new Date(),
+        isSecret: true,
+        unrecorded: true
+      };
+
+      return invoice;
+    });
+
+    res.send(serialize({ id: "secret-" + Date.now(), ...created }));
   });
 
   // ── List / view ─────────────────────────────────────────────────────────
   router.get("/invoices", mw.auth, mw.perm("invoice", "reports"), async (req, res) => {
     const { from, to } = dateRange(req.query);
     const q = str(req.query.q, { max: 60 }).toLowerCase();
-    let list = await queryRange(req.ctx, from, to);
-    if (!seesAll(req.ctx)) list = list.filter((i) => i.createdBy === req.ctx.userId);
+    // pending / ready / open (= both): all unfinished job work, whatever its date
+    const fulfil = String(req.query.fulfilment || "");
+    let list;
+    if (["open", "pending", "ready"].includes(fulfil)) {
+      const wanted = fulfil === "open" ? ["pending", "ready"] : [fulfil];
+      list = (await Promise.all(wanted.map(async (s) => (await invoicesOf(req.ctx).where("fulfilmentStatus", "==", s).get()).docs.map(docOut)))).flat()
+        .filter((i) => (i.status || "active") !== "cancelled");
+    } else {
+      list = await queryRange(req.ctx, from, to);
+      if (!seesAll(req.ctx)) list = list.filter((i) => i.createdBy === req.ctx.userId);
+    }
     if (q) list = list.filter((i) =>
-      `${i.invoiceNumber} ${i.customer?.name || i.customerName || ""} ${i.customer?.mobile || i.customerContact || ""}`.toLowerCase().includes(q));
+      `${i.invoiceNumber} ${i.workOrderNo || ""} ${i.customer?.name || i.customerName || ""} ${i.customer?.mobile || i.customerContact || ""}`.toLowerCase().includes(q));
     list.sort(sortNewest);
     res.send({
       from, to,
@@ -141,6 +273,11 @@ module.exports = function invoiceRoutes(deps) {
         customerMobile: i.customer?.mobile || i.customerContact || "",
         payable: i.summary?.payable ?? i.totals?.grand ?? 0,
         balance: i.summary?.balance ?? 0,
+        paid: i.summary?.paid ?? 0,
+        fulfilmentStatus: i.fulfilmentStatus || "",
+        stage: i.stage || "",
+        workStatus: i.workStatus || "",
+        workOrderNo: i.workOrderNo || "",
         paymentModes: [...new Set((i.payments || []).map((p) => p.mode))].join(", ") || i.paymentMode || "",
         createdByName: i.createdByName || ""
       }))
@@ -151,7 +288,7 @@ module.exports = function invoiceRoutes(deps) {
     const doc = await invoicesOf(ctx).doc(id).get();
     if (!doc.exists) throw new HttpError(404, "Invoice not found.");
     const inv = doc.data();
-    if (!seesAll(ctx) && inv.createdBy !== ctx.userId) throw new HttpError(404, "Invoice not found.");
+    if (!seesAll(ctx) && inv.createdBy !== ctx.userId && !["pending", "ready"].includes(inv.fulfilmentStatus)) throw new HttpError(404, "Invoice not found.");
     return doc;
   }
 
@@ -163,11 +300,13 @@ module.exports = function invoiceRoutes(deps) {
   router.post("/invoices/:id/cancel", mw.auth, mw.superAdmin, async (req, res) => {
     const reason = str(req.body.reason, { required: true, field: "Cancellation reason", max: 300 });
     const ref = invoicesOf(req.ctx).doc(req.params.id);
+    let cancelledInv = null;
     await db.runTransaction(async (t) => {
       const doc = await t.get(ref);
       if (!doc.exists) throw new HttpError(404, "Invoice not found.");
       const inv = doc.data();
       if (inv.status === "cancelled") throw bad("Invoice is already cancelled.");
+      cancelledInv = inv;
       const productRefs = (inv.items || []).filter((i) => i.productId)
         .map((i) => req.ctx.licenseRef.collection("products").doc(i.productId));
       const productDocs = [];
@@ -178,6 +317,9 @@ module.exports = function invoiceRoutes(deps) {
           t.update(p.ref, { status: "in_stock", soldInvoiceId: null, soldInvoiceNumber: null, soldAt: null });
       }
     });
+    if (cancelledInv?.workOrderId) {
+      try { await cancelWorkForInvoice(req.ctx.licenseRef, cancelledInv.workOrderId, req.ctx.name, reason); } catch (e) { console.error("cancel work order failed:", e.message); }
+    }
     res.send({ success: true });
   });
 
@@ -185,8 +327,11 @@ module.exports = function invoiceRoutes(deps) {
   router.get("/reports/sales", mw.auth, mw.perm("reports"), async (req, res) => {
     const { from, to } = dateRange(req.query);
     const all = await queryRange(req.ctx, from, to);
-    const active = all.filter((i) => (i.status || "active") === "active" && i.summary);
+    const isOpenJob = (i) => ["pending", "ready"].includes(i.fulfilmentStatus);
+    const active = all.filter((i) => (i.status || "active") === "active" && i.summary && !isOpenJob(i));   // delivered / ordinary sales only
     const add = (list, f) => round2(list.reduce((s, i) => s + (f(i) || 0), 0));
+    const openJobs = all.filter((i) => (i.status || "active") === "active" && isOpenJob(i));
+    const pendingJobWork = { count: openJobs.length, advance: add(openJobs, (i) => i.summary?.paid) };
 
     const byDay = {};
     const byPayment = {};
@@ -208,7 +353,8 @@ module.exports = function invoiceRoutes(deps) {
       from, to,
       totals: {
         count: active.length,
-        cancelled: all.length - active.length,
+        pendingJobWork,
+        cancelled: all.filter((i) => (i.status || "active") === "cancelled").length,
         sales: active.filter((i) => i.mode === "sale").length,
         jobWork: active.filter((i) => i.mode === "job_work").length,
         taxable: add(active, (i) => i.summary.taxable),
@@ -226,7 +372,7 @@ module.exports = function invoiceRoutes(deps) {
       byHsn: Object.values(byHsn),
       invoices: all.sort(sortNewest).map((i) => ({
         id: i.id, invoiceNumber: i.invoiceNumber, date: i.date, status: i.status || "active", mode: i.mode || "sale",
-        customerName: i.customer?.name || i.customerName || "", customerGstin: i.customer?.gstin || "",
+        customerName: i.customer?.name || i.customerName || "", customerGstin: i.customer?.gstin || "", fulfilmentStatus: i.fulfilmentStatus || "",
         taxable: i.summary?.taxable ?? 0, cgst: i.summary?.cgst ?? 0, sgst: i.summary?.sgst ?? 0, igst: i.summary?.igst ?? 0,
         credit: i.summary?.credit ?? 0, payable: i.summary?.payable ?? i.totals?.grand ?? 0
       }))
@@ -235,3 +381,6 @@ module.exports = function invoiceRoutes(deps) {
 
   return router;
 };
+
+module.exports.readCustomer = readCustomer;
+module.exports.readSecretCustomer = readSecretCustomer;

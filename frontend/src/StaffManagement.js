@@ -9,6 +9,9 @@ function StaffManagement({ userRole, showCreatedBy }) {
   const [staffList, setStaffList] = useState([]);
   const [editingId, setEditingId] = useState(null);
   const [error, setError] = useState("");
+  const [loginDialog, setLoginDialog] = useState(null); // { staff, mode: "create" | "password", username, password }
+  const [loginMsg, setLoginMsg] = useState("");
+  const isOwner = userRole === "super_admin";
 
   const fetchStaff = useCallback(() => {
     api.get("/staff").then(({ data }) => setStaffList(data)).catch((err) => setError(errMsg(err)));
@@ -35,7 +38,9 @@ function StaffManagement({ userRole, showCreatedBy }) {
     communicationSms: true,
     communicationEmail: true,
     salesCommission: false,
-    remark: ""
+    remark: "",
+    loginUsername: "",
+    loginPassword: ""
   });
 
   const resetForm = () => { setEditingId(null); setError(""); setFormData({
@@ -46,7 +51,8 @@ function StaffManagement({ userRole, showCreatedBy }) {
     emergencyContactPerson: "", emergencyContactNo: "",
     bloodGroup: "", documentType: "", documentNo: "",
     communicationSms: true, communicationEmail: true,
-    salesCommission: false, remark: ""
+    salesCommission: false, remark: "",
+    loginUsername: "", loginPassword: ""
   }); };
 
   const handleSubmit = async (e) => {
@@ -54,7 +60,12 @@ function StaffManagement({ userRole, showCreatedBy }) {
     setError("");
     try {
       if (editingId) await api.put(`/staff/${editingId}`, formData);
-      else await api.post("/staff", formData);
+      else {
+        const { data } = await api.post("/staff", formData);
+        if (data.loginUsername) {
+          alert(`Staff saved and login created.\n\nUsername: ${data.loginUsername}\nThey sign in on the normal login page with the shop's license key, this username and the password you set.`);
+        }
+      }
       resetForm();
       fetchStaff();
       setView("list"); // go back to list after save
@@ -64,9 +75,36 @@ function StaffManagement({ userRole, showCreatedBy }) {
   };
 
   const startEdit = (s) => {
-    setFormData((prev) => Object.fromEntries(Object.keys(prev).map((k) => [k, s[k] ?? prev[k]])));
+    setFormData((prev) => Object.fromEntries(Object.keys(prev).map((k) => [k, k.startsWith("login") ? "" : (s[k] ?? prev[k])])));
     setEditingId(s.id);
     setView("form");
+  };
+
+  const submitLogin = async (e) => {
+    e.preventDefault();
+    const { staff, mode, username, password } = loginDialog;
+    setLoginMsg("");
+    try {
+      if (mode === "create") await api.post(`/staff/${staff.id}/login`, { username, password });
+      else await api.post(`/staff/${staff.id}/login/password`, { password });
+      setLoginDialog(null);
+      fetchStaff();
+      alert(mode === "create"
+        ? `Login created for ${staff.fullName}.\n\nUsername: ${username}\nThey sign in with the shop's license key, this username and the password you set.`
+        : `Password changed for ${staff.fullName}. They have been signed out.`);
+    } catch (err) {
+      setLoginMsg(errMsg(err, "Could not save the login."));
+    }
+  };
+
+  const removeLogin = async (s) => {
+    if (!window.confirm(`Remove ${s.fullName}'s login? They won't be able to sign in or receive work any more.`)) return;
+    try {
+      await api.delete(`/staff/${s.id}/login`);
+      fetchStaff();
+    } catch (err) {
+      alert(errMsg(err));
+    }
   };
 
   const handleDelete = async (s) => {
@@ -106,6 +144,31 @@ function StaffManagement({ userRole, showCreatedBy }) {
         </header>
 
         {error && <div className="alert error">{error}</div>}
+        {loginDialog && (
+          <div className="modal-backdrop" onClick={() => setLoginDialog(null)}>
+            <form className="modal" onClick={(e) => e.stopPropagation()} onSubmit={submitLogin}>
+              <h3>{loginDialog.mode === "create" ? "Create username & password" : "Reset password"} — {loginDialog.staff.fullName}</h3>
+              <p className="hint">
+                {loginDialog.mode === "create"
+                  ? "This is not a login page — it creates the credentials. They sign in on the normal login page with the shop's license key plus this username and password, and see only their own work."
+                  : "They will be signed out everywhere and must use the new password."}
+              </p>
+              {loginDialog.mode === "create" && (
+                <label className="field">Username
+                  <input autoFocus value={loginDialog.username} onChange={(e) => setLoginDialog({ ...loginDialog, username: e.target.value.trim() })} placeholder="e.g. venkat" required minLength={3} />
+                </label>
+              )}
+              <label className="field">{loginDialog.mode === "create" ? "Password" : "New password"} (min. 8 characters)
+                <input type="text" autoComplete="off" value={loginDialog.password} onChange={(e) => setLoginDialog({ ...loginDialog, password: e.target.value })} required minLength={8} />
+              </label>
+              {loginMsg && <div className="alert error">{loginMsg}</div>}
+              <div className="btn-group">
+                <button className="btn btn-primary" type="submit">Save</button>
+                <button className="btn btn-secondary" type="button" onClick={() => setLoginDialog(null)}>Cancel</button>
+              </div>
+            </form>
+          </div>
+        )}
         <div className="table-card" style={{ marginTop: "24px" }}>
           {staffList.length === 0 ? (
             <div style={{
@@ -127,6 +190,7 @@ function StaffManagement({ userRole, showCreatedBy }) {
                   <th>Mobile</th>
                   <th>Joining Date</th>
                   <th>Gender</th>
+                  <th>App login</th>
                   {showCreatedBy && userRole === "super_admin" && <th>Created By</th>}
                   <th></th>
                 </tr>
@@ -161,6 +225,22 @@ function StaffManagement({ userRole, showCreatedBy }) {
                       }}>
                         {s.gender || "—"}
                       </span>
+                    </td>
+                    <td className="nowrap">
+                      {s.hasLogin ? (
+                        <>
+                          <span className="pill ok" title="Can sign in and receive work orders">🔔 @{s.loginUsername}</span>
+                          {isOwner && (
+                            <div style={{ marginTop: 4 }}>
+                              <button className="link-btn inline sub" onClick={() => { setLoginMsg(""); setLoginDialog({ staff: s, mode: "password", username: s.loginUsername, password: "" }); }}>Reset password</button>
+                              {" · "}
+                              <button className="link-btn inline sub" onClick={() => removeLogin(s)}>Remove login</button>
+                            </div>
+                          )}
+                        </>
+                      ) : isOwner ? (
+                        <button className="btn btn-sm btn-secondary" onClick={() => { setLoginMsg(""); setLoginDialog({ staff: s, mode: "create", username: "", password: "" }); }}>🔑 Give login</button>
+                      ) : <span className="sub">—</span>}
                     </td>
                     {showCreatedBy && userRole === "super_admin" && (
                       <td>
@@ -289,6 +369,25 @@ function StaffManagement({ userRole, showCreatedBy }) {
               <input type="text" value={formData.documentNo} onChange={e => f("documentNo", e.target.value)} />
             </div>
           </div>
+
+          {/* App login — created together with the staff member */}
+          {isOwner && !editingId && (
+            <div className="details-card" style={{ gridColumn: "span 2" }}>
+              <h3>🔑 App login (optional) — so they can receive work and notifications</h3>
+              <p className="hint" style={{ marginTop: 0 }}>
+                They sign in on the normal login page with the shop's <strong>license key</strong>, this <strong>username</strong> and <strong>password</strong>.
+                They will see only their own work — nothing about billing, stock or customers. Leave empty for staff who don't need to sign in.
+              </p>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+                <div className="input-row"><label>Username</label>
+                  <input type="text" autoComplete="off" value={formData.loginUsername} onChange={e => f("loginUsername", e.target.value.trim())} placeholder="e.g. venkat" minLength={3} />
+                </div>
+                <div className="input-row"><label>Password</label>
+                  <input type="text" autoComplete="off" value={formData.loginPassword} onChange={e => f("loginPassword", e.target.value)} placeholder="min. 8 characters" minLength={8} required={!!formData.loginUsername} />
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Other Details */}
           <div className="details-card">

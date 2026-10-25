@@ -5,9 +5,14 @@ import { inr, grams, displayDate, todayLocal } from "./format";
 /**
  * 📊 Dashboard — live figures for today / this month, stock and rates
  */
-function Dashboard({ session, can, onNewInvoice, onOpenInvoice, onGo }) {
+function Dashboard({ session, can, onNewInvoice, onOpenInvoice, onGo, onJobWork }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
+  const [work, setWork] = useState(null);
+  useEffect(() => {
+    if (can("workorders")) api.get("/work-orders").then(({ data }) => setWork(data.counts)).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     api.get("/dashboard").then(({ data }) => setData(data)).catch((err) => setError(errMsg(err)));
@@ -35,6 +40,28 @@ function Dashboard({ session, can, onNewInvoice, onOpenInvoice, onGo }) {
         <div className="alert warn">⚠️ Today's gold rates are not set. <button className="link-btn inline" onClick={() => onGo("rates")}>Update rates</button></div>
       )}
       {error && <div className="alert error">{error}</div>}
+
+      {work && (work.completed > 0 || work.overdue > 0) && (
+        <div className="alert warn">
+          🔨 {work.completed > 0 && <>{work.completed} piece{work.completed === 1 ? " is" : "s are"} finished and waiting for your check. </>}
+          {work.overdue > 0 && <>{work.overdue} work order{work.overdue === 1 ? " is" : "s are"} overdue. </>}
+          <button className="link-btn inline" onClick={() => onGo("workorders")}>Open Work Orders</button>
+        </div>
+      )}
+
+      {data?.jobWork && (data.jobWork.pending > 0 || data.jobWork.ready > 0) && (
+        <div className="jobwork-strip">
+          <button className={`jw-card ${data.jobWork.ready ? "ready" : ""}`} onClick={() => onJobWork("ready")}>
+            <span>📞 Ready for pickup</span><strong>{data.jobWork.ready}</strong><small>call the customer</small>
+          </button>
+          <button className="jw-card" onClick={() => onJobWork("pending")}>
+            <span>⏳ In the workshop</span><strong>{data.jobWork.pending}</strong><small>job work pending</small>
+          </button>
+          <div className="jw-card plain">
+            <span>💰 Advance held</span><strong>{inr(data.jobWork.advance)}</strong><small>on unfinished orders</small>
+          </div>
+        </div>
+      )}
 
       <div className="summary-grid four">
         {inv && (

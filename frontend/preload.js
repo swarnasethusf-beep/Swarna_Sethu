@@ -27,5 +27,9 @@ contextBridge.exposeInMainWorld("esp32", {
  * app falls back to the browser's print dialog ("Save as PDF").
  */
 contextBridge.exposeInMainWorld("desktop", {
-  saveInvoicePdf: (fileName) => ipcRenderer.invoke("invoice:save-pdf", fileName)
+  saveInvoicePdf: (fileName) => ipcRenderer.invoke("invoice:save-pdf", fileName),
+  // Barcode label printers (installed Windows printers) and label printing
+  listPrinters: () => ipcRenderer.invoke("labels:printers"),
+  printLabels: (job) => ipcRenderer.invoke("labels:print", job),
+  saveLabelsPdf: (job) => ipcRenderer.invoke("labels:pdf", job)
 });

@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const { HttpError, todayIST, createRateLimiter } = require("./lib/util");
+const { permissionsFor } = require("./lib/perms");
 
 const SHOP_TOKEN_TTL = 12 * 60 * 60;  // 12 h
 const ADMIN_TOKEN_TTL = 8 * 60 * 60;  // 8 h
@@ -64,9 +65,8 @@ function createApp(deps) {
         role: user.role,
         name: user.name,
         username: user.username,
-        permissions: user.role === "super_admin"
-          ? { invoice: true, inventory: true, staff: true, reports: true }
-          : { invoice: false, inventory: false, staff: false, reports: false, ...(user.permissions || {}) },
+        permissions: permissionsFor(user.role, user.permissions),
+        staffId: user.staffId || "",
         tokenVersion: user.tokenVersion || 0
       };
       contextCache.set(cacheKey, { ctx, expires: Date.now() + CONTEXT_CACHE_MS });
@@ -94,6 +94,11 @@ function createApp(deps) {
     if (!perms.some((p) => can(req.ctx, p))) throw new HttpError(403, "You don't have access to this module.");
     next();
   };
+  // Shop staff (owner / admins) only — goldsmith logins are kept out of rates, dashboard, settings…
+  const office = (req, res, next) => {
+    if (!["super_admin", "admin"].includes(req.ctx.role)) throw new HttpError(403, "You don't have access to this.");
+    next();
+  };
   const superAdmin = (req, res, next) => {
     if (req.ctx.role !== "super_admin") throw new HttpError(403, "Only the shop owner (Super Admin) can do this.");
     next();
@@ -107,7 +112,7 @@ function createApp(deps) {
   const shared = {
     ...deps,
     rateLimit,
-    mw: { auth, perm, superAdmin, globalAdmin },
+    mw: { auth, perm, office, superAdmin, globalAdmin },
     can,
     forgetUser,
     forgetLicense,
@@ -123,6 +128,9 @@ function createApp(deps) {
   app.use(require("./routes/inventory")(shared));
   app.use(require("./routes/staff")(shared));
   app.use(require("./routes/invoices")(shared));
+  app.use(require("./routes/jobwork")(shared));
+  app.use(require("./routes/work")(shared));
+  app.use(require("./routes/notifications")(shared));
 
   app.use((req, res) => res.status(404).send({ error: "Not found" }));
   // eslint-disable-next-line no-unused-vars

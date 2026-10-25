@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import api, { errMsg } from "./api";
-import { amountInWords, STATES } from "./shared/billing";
+import { amountInWords, STATES, PAYMENT_MODES } from "./shared/billing";
 import { inr, displayDate } from "./format";
 import { printInvoice, saveInvoicePdf, isDesktop } from "./printing";
 
@@ -15,15 +15,37 @@ const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString("en-IN", { dateStyl
  * PDF carries every detail shown on the printed invoice.
  * `autoAction` ("print" | "pdf") runs once the invoice has loaded (used by the list's quick buttons).
  */
-function InvoiceView({ id, canCancel, onBack, onNew, autoAction, onAutoActionDone }) {
-  const [inv, setInv] = useState(null);
+function InvoiceView({ id, invoiceData, canCancel, canBill, onSettle, onBack, onNew, autoAction, onAutoActionDone }) {
+  const [inv, setInv] = useState(invoiceData || null);
   const [error, setError] = useState("");
   const [cancelling, setCancelling] = useState(false);
   const [pdfMsg, setPdfMsg] = useState({ text: "", type: "" });
+  const [pay, setPay] = useState(null);                       // payment dialog: { mode, amount, reference }
+  const [jobMsg, setJobMsg] = useState({ text: "", type: "" });
+  const [busy, setBusy] = useState(false);
+
+  const markReady = async () => {
+    setBusy(true); setJobMsg({ text: "", type: "" });
+    try { await api.post(`/invoices/${id || inv.id}/ready`); load(); } catch (err) { setJobMsg({ text: errMsg(err), type: "error" }); } finally { setBusy(false); }
+  };
+  const submitPayment = async (e) => {
+    e.preventDefault();
+    setBusy(true); setJobMsg({ text: "", type: "" });
+    try {
+      await api.post(`/invoices/${id || inv.id}/payments`, pay);
+      setPay(null); load();
+      setJobMsg({ text: "✅ Payment recorded.", type: "success" });
+    } catch (err) { setJobMsg({ text: errMsg(err), type: "error" }); } finally { setBusy(false); }
+  };
 
   const load = useCallback(() => {
+    if (invoiceData) {
+      setInv(invoiceData);
+      return;
+    }
+    if (!id) return;
     api.get(`/invoices/${id}`).then(({ data }) => setInv(data)).catch((err) => setError(errMsg(err)));
-  }, [id]);
+  }, [id, invoiceData]);
   useEffect(load, [load]);
 
   const savePdf = useCallback(async (invoice) => {
@@ -72,24 +94,81 @@ function InvoiceView({ id, canCancel, onBack, onNew, autoAction, onAutoActionDon
   const cancelled = inv.status === "cancelled";
   const jobWork = inv.mode === "job_work";
 
+  const isSecret = !!inv.isSecret;
+  const fs = inv.fulfilmentStatus || "";
+  const openJob = !cancelled && (fs === "pending" || fs === "ready");   // job work not yet handed over
+  const orderStage = inv.stage === "order";                              // phase 1: an order receipt, no bill amount yet
+  const balance = s.balance || 0;
+  const WORK = { assigned: "waiting for the goldsmith to start", in_progress: "goldsmith is working on it", completed: "goldsmith finished", closed: "closed", cancelled: "cancelled" };
+
   return (
     <div>
       <div className="page-header no-print">
         <div>
-          <h1>Invoice {inv.invoiceNumber}</h1>
-          <p>{cancelled ? `Cancelled — ${inv.cancelReason}` : `Created by ${inv.createdByName || "—"}`}</p>
+          <h1>Invoice {inv.invoiceNumber} {isSecret && <span className="pill warn">🔒 Unrecorded</span>}</h1>
+          <p>{cancelled ? `Cancelled — ${inv.cancelReason}` : (isSecret ? "Confidential Invoice · Not saved to database" : `Created by ${inv.createdByName || "—"}`)}</p>
         </div>
         <div className="btn-group">
           <button className="btn btn-secondary" onClick={onBack}>← Invoices</button>
-          {onNew && <button className="btn btn-secondary" onClick={onNew}>➕ New</button>}
-          {canCancel && !cancelled && !legacy && (
+          {onNew && <button className="btn btn-secondary" onClick={onNew}>{isSecret ? "➕ New Direct" : "➕ New"}</button>}
+          {canBill && openJob && fs === "pending" && <button className="btn btn-secondary" disabled={busy} onClick={markReady} title="Use this when the work is done but the goldsmith didn't update it">✅ Mark work ready</button>}
+          {canBill && !cancelled && !legacy && !isSecret && (balance > 0 || orderStage) && (
+            <button className="btn btn-secondary" onClick={() => setPay({ mode: "Cash", amount: "", reference: "" })}>{orderStage ? "💰 Add advance" : "💰 Receive payment"}</button>
+          )}
+          {canBill && openJob && onSettle && <button className="btn btn-primary" onClick={onSettle}>📦 Finalize &amp; deliver</button>}
+          {canCancel && !cancelled && !legacy && !isSecret && (
             <button className="btn btn-danger" disabled={cancelling} onClick={cancel}>Cancel invoice</button>
           )}
           <button className="btn btn-secondary" onClick={() => savePdf(inv)} title={isDesktop() ? "Save as a PDF file" : "Opens the print dialog — choose “Save as PDF”"}>⬇️ Save PDF</button>
           <button className="btn btn-primary" onClick={() => printInvoice(inv)}>🖨️ Print</button>
         </div>
       </div>
+      {isSecret && openJob && (
+        <div className="alert warn no-print" style={{ marginBottom: 12 }}>
+          🔒 <strong>Unrecorded Job Order (Phase 1):</strong> Currently in progress in workshop. Once finalized &amp; delivered in Phase 2, this invoice and work order will be <strong>permanently deleted</strong> from database logs.
+        </div>
+      )}
+      {isSecret && !openJob && (
+        <div className="alert warn no-print" style={{ marginBottom: 12 }}>
+          ℹ️ This invoice was completed in confidential mode and was <strong>not saved</strong> in the database log. Any billed stock items and work orders were <strong>permanently deleted</strong> from Firebase.
+        </div>
+      )}
       {pdfMsg.text && <div className={`alert ${pdfMsg.type} no-print`}>{pdfMsg.text}</div>}
+      {jobMsg.text && <div className={`alert ${jobMsg.type} no-print`}>{jobMsg.text}</div>}
+      {openJob && (
+        <div className={`alert ${fs === "ready" ? "success" : "warn"} no-print`} style={{ lineHeight: 1.6 }}>
+          {fs === "ready"
+            ? <>📞 <strong>The work is ready.</strong> Call {cust.name}{cust.mobile ? ` on ${cust.mobile}` : ""} to collect it. {orderStage ? <>Advance held: <strong>{inr(s.paid)}</strong>. The final bill is prepared at pickup.</> : balance > 0 ? <>Balance expected at pickup: <strong>{inr(balance)}</strong> (may change with the final weight).</> : null}</>
+            : <>⏳ <strong>Job work in progress.</strong> {inv.workOrderNo ? `${inv.workOrderNo} — ${WORK[inv.workStatus] || "with the goldsmith"}. ` : "No goldsmith login is linked — use “Mark work ready” when it is done. "}
+              {orderStage ? <>Advance held: <strong>{inr(s.paid)}</strong>.</> : <>Estimated balance at pickup: <strong>{inr(balance)}</strong>.</>}</>}
+          {" "}Use <strong>Finalize &amp; deliver</strong> at pickup to enter the finished weight and any extra gold.
+        </div>
+      )}
+      {fs === "delivered" && !cancelled && (
+        <div className="alert success no-print">✔ Delivered {inv.deliveredAt ? `on ${new Date(inv.deliveredAt).toLocaleDateString("en-IN")}` : ""}{inv.deliveredByName ? ` by ${inv.deliveredByName}` : ""}.</div>
+      )}
+      {pay && (
+        <div className="modal-backdrop no-print" onClick={() => setPay(null)}>
+          <form className="modal" onClick={(e) => e.stopPropagation()} onSubmit={submitPayment}>
+            <h3>Receive payment — {inv.invoiceNumber}</h3>
+            <p className="hint">{orderStage ? <>Advance held so far: <strong>{inr(s.paid)}</strong></> : <>Balance due: <strong>{inr(balance)}</strong></>}</p>
+            <label className="field">Mode
+              <select value={pay.mode} onChange={(e) => setPay({ ...pay, mode: e.target.value })}>{PAYMENT_MODES.map((m) => <option key={m}>{m}</option>)}</select>
+            </label>
+            <label className="field">Amount received (₹)
+              <input type="number" min="0.01" step="0.01" autoFocus required value={pay.amount} onChange={(e) => setPay({ ...pay, amount: e.target.value })} />
+            </label>
+            <button type="button" className="link-btn inline" onClick={() => setPay({ ...pay, amount: balance })}>= full balance ({inr(balance)})</button>
+            <label className="field" style={{ marginTop: 8 }}>Reference / UTR (optional)
+              <input value={pay.reference} onChange={(e) => setPay({ ...pay, reference: e.target.value })} />
+            </label>
+            <div className="btn-group">
+              <button className="btn btn-primary" type="submit" disabled={busy}>Save payment</button>
+              <button className="btn btn-secondary" type="button" onClick={() => setPay(null)}>Cancel</button>
+            </div>
+          </form>
+        </div>
+      )}
 
       <div className={`print-invoice ${cancelled ? "cancelled" : ""}`}>
         {cancelled && <div className="watermark">CANCELLED</div>}
@@ -103,7 +182,7 @@ function InvoiceView({ id, canCancel, onBack, onNew, autoAction, onAutoActionDon
             {shop.stateCode && <div>State: {stateName(shop.stateCode)} ({shop.stateCode})</div>}
           </div>
           <div className="pi-title">
-            <div className="pi-doc">TAX INVOICE{jobWork ? " — JOB WORK" : ""}</div>
+            <div className="pi-doc">{isSecret ? "ESTIMATE / RETAIL INVOICE" : orderStage ? "JOB WORK ORDER RECEIPT" : openJob ? "JOB WORK ORDER — PROVISIONAL" : (jobWork ? "TAX INVOICE — JOB WORK" : "TAX INVOICE")}</div>
             <div className="pi-copy">Original for recipient</div>
             <table className="pi-meta">
               <tbody>
@@ -133,7 +212,13 @@ function InvoiceView({ id, canCancel, onBack, onNew, autoAction, onAutoActionDon
             {inv.cancelledByName ? ` by ${inv.cancelledByName}` : ""} — Reason: {inv.cancelReason || "—"}
           </div>
         )}
-        {!legacy && (
+        {openJob && !orderStage && (
+          <div className="pi-cancel" style={{ borderColor: "#b8860b", color: "#7a5a07" }}>
+            <strong>PROVISIONAL.</strong> This is the order receipt. The amount is an estimate from the weights at the time of the order;
+            the final tax invoice (same number) is issued when the finished piece is delivered. Advance received: {inr(s.paid)}.
+          </div>
+        )}
+        {!legacy && !orderStage && (
           <div className="pi-rates">
             <span>
               <strong>Rates applied (₹/g):</strong>{" "}
@@ -147,6 +232,45 @@ function InvoiceView({ id, canCancel, onBack, onNew, autoAction, onAutoActionDon
 
         {legacy ? (
           <p className="muted-text">This invoice was created with an older version of the app; only its total is available: <strong>{inr(inv.totals?.grand)}</strong></p>
+        ) : orderStage ? (
+          <>
+            <table className="pi-table">
+              <thead><tr><th>Job code</th><th>What is to be made</th><th>Purity</th>{inv.dueDate && <th>Promised by</th>}</tr></thead>
+              <tbody><tr>
+                <td className="left"><strong>{inv.items[0]?.itemCode}</strong></td>
+                <td className="left">{inv.items[0]?.description}</td>
+                <td>{inv.items[0]?.purity}</td>
+                {inv.dueDate && <td>{displayDate(inv.dueDate)}</td>}
+              </tr></tbody>
+            </table>
+            {inv.oldGold?.length > 0 && (
+              <table className="pi-table">
+                <thead><tr><th>#</th><th>Customer's gold received (weighed — not charged)</th><th>Gross g</th><th>Less g</th><th>Net g</th><th>Touch %</th><th>Fine g</th></tr></thead>
+                <tbody>
+                  {inv.oldGold.map((o, i) => (
+                    <tr key={i}><td>{i + 1}</td><td className="left">{o.description}</td><td>{o.grossWt.toFixed(3)}</td><td>{o.lessWt.toFixed(3)}</td><td>{o.netWt.toFixed(3)}</td><td>{o.touch}</td><td>{o.fineWt.toFixed(3)}</td></tr>
+                  ))}
+                </tbody>
+                <tfoot><tr><td></td><td className="left">Total</td><td></td><td></td><td>{s.oldGoldNetWt.toFixed(3)}</td><td></td><td>{s.oldGoldFineWt.toFixed(3)}</td></tr></tfoot>
+              </table>
+            )}
+            <div className="pi-bottom">
+              <div className="pi-left">
+                {inv.payments?.length > 0 && (
+                  <table className="pi-table compact pi-paytable">
+                    <thead><tr><th>Advance received</th><th>Reference</th><th>Amount</th></tr></thead>
+                    <tbody>{inv.payments.map((p, i) => <tr key={i}><td className="left">{p.mode}</td><td className="left">{p.reference || "—"}</td><td>{inr(p.amount)}</td></tr>)}</tbody>
+                  </table>
+                )}
+                {inv.notes && <div className="pi-pay"><strong>Notes:</strong> {inv.notes}</div>}
+                <div className="pi-pay">
+                  This is an order receipt, not a tax invoice. The customer's gold is not charged. After the piece is made, the final bill
+                  (new gold added by the shop, making, stones and wastage, with GST) is prepared under this same number and your advance is deducted.
+                </div>
+              </div>
+              <table className="pi-totals"><tbody><tr className="grand"><td>Advance received</td><td>{inr(s.paid)}</td></tr></tbody></table>
+            </div>
+          </>
         ) : (
           <>
             <table className="pi-table">
@@ -154,7 +278,7 @@ function InvoiceView({ id, canCancel, onBack, onNew, autoAction, onAutoActionDon
                 <tr>
                   <th>#</th><th>Description</th><th>HSN</th><th>Purity</th><th>Pcs</th>
                   <th>Gross g</th><th>Stone g</th><th>Net g</th><th>VA %</th>
-                  {jobWork ? <th>Fine g</th> : <><th>Rate ₹/g</th><th>Gold value ₹</th></>}
+                  {jobWork ? <><th>Fine g</th><th>Wastage ₹</th></> : <><th>Rate ₹/g</th><th>Gold value ₹</th></>}
                   <th>Making ₹</th><th>Stone ₹</th><th>Amount ₹</th>
                 </tr>
               </thead>
@@ -170,7 +294,7 @@ function InvoiceView({ id, canCancel, onBack, onNew, autoAction, onAutoActionDon
                     <td>{it.hsn}</td><td>{it.purity}</td><td>{it.pcs}</td>
                     <td>{it.grossWt.toFixed(3)}</td><td>{it.stoneWt.toFixed(3)}</td><td>{it.netWt.toFixed(3)}</td>
                     <td>{it.wastagePct || "—"}</td>
-                    {jobWork ? <td>{it.fineWt.toFixed(3)}</td> : <><td>{amt(it.rate)}</td><td>{amt(it.goldValue)}</td></>}
+                    {jobWork ? <><td>{it.fineWt.toFixed(3)}</td><td>{amt(it.wastageAmount)}</td></> : <><td>{amt(it.rate)}</td><td>{amt(it.goldValue)}</td></>}
                     <td>{amt(it.makingAmount)}</td><td>{amt(it.stoneCharges)}</td>
                     <td><strong>{amt(it.lineTotal)}</strong></td>
                   </tr>
@@ -182,7 +306,7 @@ function InvoiceView({ id, canCancel, onBack, onNew, autoAction, onAutoActionDon
                   <td>{inv.items.reduce((n, it) => n + (it.pcs || 0), 0)}</td>
                   <td>{sumWt(inv.items, "grossWt")}</td><td>{sumWt(inv.items, "stoneWt")}</td><td>{sumWt(inv.items, "netWt")}</td>
                   <td></td>
-                  {jobWork ? <td>{s.itemsFineWt.toFixed(3)}</td> : <><td></td><td>{amt(s.goldValue)}</td></>}
+                  {jobWork ? <><td>{s.itemsFineWt.toFixed(3)}</td><td>{amt(s.wastageTotal)}</td></> : <><td></td><td>{amt(s.goldValue)}</td></>}
                   <td>{amt(s.makingTotal)}</td><td>{amt(s.stoneTotal)}</td>
                   <td>{amt(inv.items.reduce((n, it) => n + it.lineTotal, 0))}</td>
                 </tr>
@@ -192,14 +316,14 @@ function InvoiceView({ id, canCancel, onBack, onNew, autoAction, onAutoActionDon
             {inv.oldGold?.length > 0 && (
               <table className="pi-table">
                 <thead>
-                  <tr><th>#</th><th>{jobWork ? "Customer's gold received" : "Old gold exchanged"}</th><th>Gross g</th><th>Less g</th><th>Net g</th><th>Touch %</th><th>Fine g</th><th>Rate 24K ₹/g</th><th>Value ₹</th></tr>
+                  <tr><th>#</th><th>{jobWork ? "Customer's gold received (not charged)" : "Old gold exchanged"}</th><th>Gross g</th><th>Less g</th><th>Net g</th><th>Touch %</th><th>Fine g</th>{!jobWork && <><th>Rate 24K ₹/g</th><th>Value ₹</th></>}</tr>
                 </thead>
                 <tbody>
                   {inv.oldGold.map((o, i) => (
                     <tr key={i}>
                       <td>{i + 1}</td><td className="left">{o.description}</td>
                       <td>{o.grossWt.toFixed(3)}</td><td>{o.lessWt.toFixed(3)}</td><td>{o.netWt.toFixed(3)}</td>
-                      <td>{o.touch}</td><td>{o.fineWt.toFixed(3)}</td><td>{amt(o.rate)}</td><td>{amt(o.value)}</td>
+                      <td>{o.touch}</td><td>{o.fineWt.toFixed(3)}</td>{!jobWork && <><td>{amt(o.rate)}</td><td>{amt(o.value)}</td></>}
                     </tr>
                   ))}
                 </tbody>
@@ -207,8 +331,8 @@ function InvoiceView({ id, canCancel, onBack, onNew, autoAction, onAutoActionDon
             )}
             {jobWork && (
               <p className="pi-note">
-                Fine gold required {s.itemsFineWt.toFixed(3)} g · received {s.oldGoldFineWt.toFixed(3)} g ·{" "}
-                {s.addedFineWt > 0 ? `supplied by shop ${s.addedFineWt.toFixed(3)} g` : `customer surplus ${s.excessFineWt.toFixed(3)} g`}
+                The customer's own gold is not charged. Fine gold needed {s.itemsFineWt.toFixed(3)} g · received from customer {s.oldGoldFineWt.toFixed(3)} g ·{" "}
+                {s.addedFineWt > 0 ? `added by the shop ${s.addedFineWt.toFixed(3)} g (charged)` : `surplus ${s.excessFineWt.toFixed(3)} g returned to the customer`}
               </p>
             )}
 
@@ -272,6 +396,20 @@ function InvoiceView({ id, canCancel, onBack, onNew, autoAction, onAutoActionDon
         </div>
         <div className="pi-system">Computer-generated invoice · Printed {fmtTime(new Date().toISOString())}</div>
       </div>
+
+      {inv.revisions?.length > 0 && (
+        <div className="card section no-print" style={{ marginTop: 16 }}>
+          <h3>Changes at delivery</h3>
+          {inv.revisions.map((r, i) => (
+            <div key={i} className="sub" style={{ marginBottom: 6 }}>
+              {new Date(r.at).toLocaleString("en-IN")} · {r.byName} · {r.reason}:{" "}
+              {r.before?.stage === "order"
+                ? <>order receipt (advance {inr(r.before?.summary?.paid)}) → final bill <strong>{inr(s.payable)}</strong></>
+                : <>total <strong>{inr(r.before?.summary?.payable)}</strong> → <strong>{inr(s.payable)}</strong> (fine gold added {Number(r.before?.summary?.addedFineWt || 0).toFixed(3)} g → {Number(s.addedFineWt || 0).toFixed(3)} g)</>}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

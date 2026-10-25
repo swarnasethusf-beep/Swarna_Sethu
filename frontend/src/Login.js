@@ -162,6 +162,7 @@ function Login({ onAuthSuccess, notice }) {
                 {loading ? "Verifying..." : "Enter Workspace"}
               </button>
             </form>
+            <p className="login-hint">Goldsmith? Sign in with the username and password your owner gave you.</p>
             <button type="button" className="link-btn" onClick={handleForgot} disabled={loading}>
               🔑 Forgot Username / Password?
             </button>

@@ -17,10 +17,12 @@ function AdminManagement() {
     password: "",
     mobile: "",
     permissions: {
-      invoice:   false,
-      inventory: false,
-      staff:     false,
-      reports:   false
+      invoice:    false,
+      inventory:  false,
+      barcode:    false,
+      staff:      false,
+      reports:    false,
+      workorders: false
     }
   });
 
@@ -90,7 +92,7 @@ function AdminManagement() {
         permissions: form.permissions
       });
       setMsg({ text: `✅ Admin "${form.name}" created successfully!`, type: "success" });
-      setForm({ name: "", username: "", password: "", mobile: "", permissions: { invoice: false, inventory: false, staff: false, reports: false } });
+      setForm({ name: "", username: "", password: "", mobile: "", permissions: { invoice: false, inventory: false, barcode: false, staff: false, reports: false, workorders: false } });
       fetchUsers();
     } catch (err) {
       setMsg({ text: errMsg(err, "Failed to create admin."), type: "error" });
@@ -122,10 +124,12 @@ function AdminManagement() {
   };
 
   const MODULE_LABELS = {
-    invoice:   { icon: "📜", label: "Invoice" },
-    inventory: { icon: "📦", label: "Inventory" },
-    staff:     { icon: "👥", label: "Staff" },
-    reports:   { icon: "📊", label: "Reports" }
+    invoice:    { icon: "📜", label: "Invoice" },
+    inventory:  { icon: "📦", label: "Inventory" },
+    barcode:    { icon: "🏷️", label: "Barcode" },
+    staff:      { icon: "👥", label: "Staff" },
+    reports:    { icon: "📊", label: "Reports" },
+    workorders: { icon: "🔨", label: "Work Orders" }
   };
 
   const admins = users.filter(u => u.role === "admin");
