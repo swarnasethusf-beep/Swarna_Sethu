@@ -59,8 +59,8 @@ set **Root Directory** as shown). Do the backend first because the websites need
 | 2 | `frontend` | The shop billing website | `REACT_APP_API_URL` = the backend's URL |
 | 3 | `admin_frontend` | The license admin website | `REACT_APP_API_URL` = the backend's URL |
 
-Backend variables: `ENCRYPTION_SECRET`, `TOKEN_SECRET`, `ADMIN_USERNAME`, `ADMIN_PASSWORD_HASH` (wrap in single quotes if your
-dashboard keeps the `$` signs), `FIREBASE_SERVICE_ACCOUNT_JSON` (base64 of the key file), `CORS_ORIGINS`, and optionally
+Backend variables: `ENCRYPTION_SECRET`, `TOKEN_SECRET`, `ADMIN_USERNAME`, `ADMIN_PASSWORD_HASH` (paste just the hash starting with `$2b$` —
+**without** the single quotes that the local `.env` file uses), `FIREBASE_SERVICE_ACCOUNT_JSON` (base64 of the key file), `CORS_ORIGINS`, and optionally
 `FAST2SMS_API_KEY` and `GOLDAPI_KEY`.
 
 Order: deploy `backend` → copy its URL → deploy `frontend` and `admin_frontend` with `REACT_APP_API_URL` set to it →

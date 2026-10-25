@@ -91,3 +91,12 @@ test("Vercel entry (api/index.js): exports a request handler and fails safely wh
   assert.match(result.body.error, /not configured correctly/);
   assert.ok(!JSON.stringify(result.body).includes("ENCRYPTION_SECRET must"), "details stay in the logs, not in the response");
 });
+
+test("env values pasted with quotes still work (e.g. ADMIN_PASSWORD_HASH from a .env file)", () => {
+  const { cleanEnvValue } = require("../lib/runtime");
+  const hash = bcrypt.hashSync("pw-123456", 4);
+  for (const pasted of [hash, `'${hash}'`, `"${hash}"`, `  '${hash}'  `])
+    assert.ok(bcrypt.compareSync("pw-123456", cleanEnvValue(pasted)), pasted.slice(0, 8));
+  assert.equal(cleanEnvValue(undefined), "");
+  assert.equal(cleanEnvValue("'unbalanced"), "'unbalanced");
+});

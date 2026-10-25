@@ -37,6 +37,13 @@ function loadServiceAccount(env) {
   }
 }
 
+/** Trim, and drop one pair of surrounding quotes (people paste `'$2b$…'` from a .env file into dashboards) */
+function cleanEnvValue(value) {
+  const v = String(value || "").trim();
+  const quoted = v.length >= 2 && (v[0] === "'" || v[0] === '"') && v[v.length - 1] === v[0];
+  return quoted ? v.slice(1, -1) : v;
+}
+
 function createRuntime(env = process.env) {
   const security = createSecurity({ encryptionSecret: env.ENCRYPTION_SECRET, tokenSecret: env.TOKEN_SECRET });
 
@@ -77,7 +84,7 @@ function createRuntime(env = process.env) {
     corsOrigins: (env.CORS_ORIGINS || "http://localhost:3000,http://localhost:3001,null")
       .split(",").map((s) => s.trim().replace(/\/+$/, "")).filter(Boolean),
     adminUsername: env.ADMIN_USERNAME || "",
-    adminPasswordHash: env.ADMIN_PASSWORD_HASH || "",
+    adminPasswordHash: cleanEnvValue(env.ADMIN_PASSWORD_HASH),
     // Vercel: requests come through a proxy and instances don't share memory
     trustProxy: env.VERCEL ? 1 : false,
     rateLimitStore: env.VERCEL ? "firestore" : "memory"
@@ -89,4 +96,4 @@ function createRuntime(env = process.env) {
   return { app, config };
 }
 
-module.exports = { createRuntime, loadServiceAccount };
+module.exports = { createRuntime, loadServiceAccount, cleanEnvValue };
