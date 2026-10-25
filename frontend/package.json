@@ -2,8 +2,8 @@
   "name": "frontend",
   "main": "electron.js",
   "version": "1.0.0",
-  "description": "Swarna Raseid Professional Gold Billing System",
-  "author": "Swarna Raseid",
+  "description": "Swarna Sethu Professional Gold Billing System",
+  "author": "Swarna Sethu",
   "homepage": "./",
   "private": true,
   "dependencies": {
@@ -12,7 +12,6 @@
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^13.5.0",
     "axios": "^1.15.0",
-    "firebase": "^12.12.1",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "react-scripts": "5.0.1",
@@ -26,9 +25,13 @@
     "wait-on": "^9.0.5"
   },
   "scripts": {
+    "sync-shared": "node scripts/sync-shared.js",
+    "prestart": "npm run sync-shared",
     "start": "react-scripts start",
-    "electron": "node_modules\\.bin\\electron .",
+    "prebuild": "npm run sync-shared",
     "build": "react-scripts build",
+    "test": "react-scripts test",
+    "electron": "electron .",
     "dist": "npm run build && electron-builder"
   },
   "eslintConfig": {
@@ -50,8 +53,8 @@
     ]
   },
   "build": {
-    "appId": "com.swarnaraseid.billing",
-    "productName": "Swarna Raseid Billing",
+    "appId": "com.swarnasethu.billing",
+    "productName": "Swarna Sethu Billing",
     "extends": null,
     "directories": {
       "output": "dist"

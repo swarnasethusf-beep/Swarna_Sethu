@@ -1,14 +1,19 @@
 {
   "name": "backend",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js",
+    "test": "node --test test/*.test.js",
+    "migrate": "node migrate.js",
+    "hash-password": "node scripts/hash-password.js",
+    "demo": "node scripts/demo-server.js",
+    "sample-data": "node scripts/sample-data.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "Swarna Sethu billing API",
   "dependencies": {
     "axios": "^1.15.0",
     "bcrypt": "^6.0.0",
@@ -17,5 +22,8 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "firebase-admin": "^13.8.0"
+  },
+  "engines": {
+    "node": "22.x"
   }
 }

@@ -1,94 +1,155 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 
+const API_URL = process.env.REACT_APP_API_URL || "http://localhost:5000";
+const api = axios.create({ baseURL: API_URL, timeout: 20000 });
+const TOKEN_KEY = "sr_admin_token";
+
+function errMsg(err, fallback = "Something went wrong.") {
+  if (err?.response?.data?.error) return err.response.data.error;
+  if (err?.response?.status === 404) return `The server at ${API_URL} doesn't support this request — it may be running old code. Restart the backend.`;
+  if (err?.response) return fallback;
+  return "Cannot reach the server. Is the backend running?";
+}
+
+const today = () => new Date().toISOString().slice(0, 10);
+const EMPTY_FORM = {
+  name: "", business: "", mobile: "", email: "", location: "", expiry: "",
+  superAdminUsername: "", superAdminPassword: ""
+};
+
 /**
- * 👑 ADMIN PORTAL - Master Dashboard
+ * 👑 ADMIN PORTAL — license issuing authority. Login is verified by the server
+ * (ADMIN_USERNAME / ADMIN_PASSWORD_HASH in backend/.env).
  */
 function App() {
-  const [isAdmin, setIsAdmin] = useState(false);
+  const [token, setTokenState] = useState(() => {
+    try { return sessionStorage.getItem(TOKEN_KEY); } catch { return null; }
+  });
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [view, setView] = useState("create"); // 'create' or 'list'
-  
-  // Form State
-  const [formData, setFormData] = useState({
-    name: "",
-    business: "",
-    mobile: "",
-    email: "",
-    location: "",
-    expiry: "",
-    superAdminUsername: "",
-    superAdminPassword: ""
-  });
-
+  const [view, setView] = useState("create"); // create | list | requests
+  const [formData, setFormData] = useState(EMPTY_FORM);
   const [licenses, setLicenses] = useState([]);
+  const [requests, setRequests] = useState([]);
+  const [renewing, setRenewing] = useState(null); // { id, expiry }
   const [error, setError] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
+  const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    if (isAdmin && view === "list") {
-      fetchLicenses();
-    }
-  }, [isAdmin, view]);
-
-  const fetchLicenses = async () => {
-    try {
-      const res = await axios.get("http://localhost:5000/licenses");
-      setLicenses(res.data);
-    } catch (err) {
-      console.error("Fetch Error:", err);
-    }
+  const setToken = (t) => {
+    setTokenState(t);
+    try { t ? sessionStorage.setItem(TOKEN_KEY, t) : sessionStorage.removeItem(TOKEN_KEY); } catch { /* ignore */ }
   };
 
-  const handleLogin = (e) => {
+  // Attach the token; drop it when the server says it's no longer valid
+  useEffect(() => {
+    const req = api.interceptors.request.use((cfg) => {
+      if (token) cfg.headers.Authorization = `Bearer ${token}`;
+      return cfg;
+    });
+    const res = api.interceptors.response.use((r) => r, (err) => {
+      if (err.response?.status === 401 && token) setToken(null);
+      return Promise.reject(err);
+    });
+    return () => { api.interceptors.request.eject(req); api.interceptors.response.eject(res); };
+  }, [token]);
+
+  const fetchLicenses = useCallback(async () => {
+    try {
+      const res = await api.get("/admin/licenses");
+      setLicenses(res.data);
+    } catch (err) {
+      setError(errMsg(err));
+    }
+  }, []);
+
+  const fetchRequests = useCallback(async () => {
+    try {
+      const res = await api.get("/admin/requests");
+      setRequests(res.data);
+    } catch (err) {
+      setError(errMsg(err));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!token) return;
+    setError("");
+    if (view === "list") fetchLicenses();
+    if (view === "requests") fetchRequests();
+  }, [token, view, fetchLicenses, fetchRequests]);
+
+  const handleLogin = async (e) => {
     e.preventDefault();
-    if (username === "admin" && password === "admin123") {
-      setIsAdmin(true);
-      setError("");
-    } else {
-      setError("❌ Invalid Admin Credentials");
+    setBusy(true); setError("");
+    try {
+      const res = await api.post("/admin/login", { username, password });
+      setToken(res.data.token);
+      setPassword("");
+    } catch (err) {
+      setError(errMsg(err));
+    } finally {
+      setBusy(false);
     }
   };
 
   const generateLicense = async (e) => {
     e.preventDefault();
-    setSuccessMsg("");
-    setError("");
-
+    setSuccessMsg(""); setError(""); setBusy(true);
     try {
-      const res = await axios.post("http://localhost:5000/add-license", formData);
-      if (res.data.success) {
-        setSuccessMsg(`✅ License Key: ${res.data.key} | Super Admin: ${formData.superAdminUsername}`);
-        setFormData({ name: "", business: "", mobile: "", email: "", location: "", expiry: "", superAdminUsername: "", superAdminPassword: "" });
-      }
+      const res = await api.post("/admin/licenses", formData);
+      setSuccessMsg(`✅ License Key: ${res.data.key} | Super Admin: ${formData.superAdminUsername}`);
+      setFormData(EMPTY_FORM);
     } catch (err) {
-      setError("❌ Error: " + (err.response?.data?.error || err.message));
+      setError("❌ " + errMsg(err));
+    } finally {
+      setBusy(false);
     }
   };
 
-  const renewLicense = async (licenseId) => {
-    const newExpiry = prompt("Enter new expiry date (YYYY-MM-DD):");
-    if (!newExpiry) return;
+  const renewLicense = async () => {
     try {
-      await axios.post("http://localhost:5000/renew-license", { id: licenseId, newExpiry });
-      alert("✅ License renewed successfully!");
+      await api.post(`/admin/licenses/${renewing.id}/renew`, { expiry: renewing.expiry });
+      setRenewing(null);
       fetchLicenses();
     } catch (err) {
-      alert("❌ Failed to renew: " + (err.response?.data?.error || err.message));
+      alert("❌ " + errMsg(err, "Failed to renew."));
     }
   };
 
-  if (!isAdmin) {
+  const setActive = async (l, active) => {
+    if (!active && !window.confirm(`Deactivate ${l.business}? Their users will be signed out immediately.`)) return;
+    try {
+      await api.post(`/admin/licenses/${l.id}/status`, { active });
+      fetchLicenses();
+    } catch (err) {
+      alert("❌ " + errMsg(err));
+    }
+  };
+
+  const decide = async (id, action) => {
+    try {
+      await api.post(`/admin/requests/${id}/decision`, { action });
+      fetchRequests();
+    } catch (err) {
+      alert("❌ " + errMsg(err));
+    }
+  };
+
+  const f = (key) => ({ value: formData[key], onChange: (e) => setFormData({ ...formData, [key]: e.target.value }) });
+  const pendingCount = requests.filter((r) => r.status === "pending").length;
+
+  if (!token) {
     return (
       <div className="admin-login-overlay">
         <div className="admin-login-card">
           <h1>🔐 Admin Access</h1>
           <p>Gold Smith Licensing Authority</p>
           <form onSubmit={handleLogin}>
-            <input type="text" placeholder="Username" value={username} onChange={(e) => setUsername(e.target.value)} />
-            <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} />
-            <button type="submit">Unlock Portal</button>
+            <input type="text" placeholder="Username" autoComplete="username" value={username} onChange={(e) => setUsername(e.target.value)} />
+            <input type="password" placeholder="Password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+            <button type="submit" disabled={busy}>{busy ? "Checking…" : "Unlock Portal"}</button>
           </form>
           {error && <p className="error">{error}</p>}
         </div>
@@ -103,12 +164,15 @@ function App() {
         <nav>
           <div className={view === "create" ? "active" : ""} onClick={() => setView("create")}>📝 Issue License</div>
           <div className={view === "list" ? "active" : ""} onClick={() => setView("list")}>📋 View Database</div>
+          <div className={view === "requests" ? "active" : ""} onClick={() => setView("requests")}>
+            🔔 Mobile Requests {pendingCount > 0 && <span className="count-badge">{pendingCount}</span>}
+          </div>
         </nav>
-        <button className="logout" onClick={() => setIsAdmin(false)}>Sign Out</button>
+        <button className="logout" onClick={() => setToken(null)}>Sign Out</button>
       </aside>
 
       <main className="admin-content">
-        {view === "create" ? (
+        {view === "create" && (
           <section className="form-page">
             <header>
               <h1>Issue New License</h1>
@@ -118,103 +182,108 @@ function App() {
             <div className="card">
               <form onSubmit={generateLicense} className="admin-form">
                 <div className="form-grid">
+                  <div className="input-group"><label>Client Name *</label><input type="text" {...f("name")} placeholder="Owner name" required /></div>
+                  <div className="input-group"><label>Business Name *</label><input type="text" {...f("business")} placeholder="Jewellery Shop Name" required /></div>
                   <div className="input-group">
-                    <label>Client Name</label>
-                    <input type="text" value={formData.name} onChange={(e) => setFormData({...formData, name: e.target.value})} placeholder="Owner name" required />
+                    <label>Mobile Number * <small>(used for OTP password reset)</small></label>
+                    <input type="tel" value={formData.mobile} onChange={(e) => setFormData({ ...formData, mobile: e.target.value.replace(/\D/g, "").slice(0, 10) })} placeholder="10 Digit Number" required />
                   </div>
-                  <div className="input-group">
-                    <label>Business Name</label>
-                    <input type="text" value={formData.business} onChange={(e) => setFormData({...formData, business: e.target.value})} placeholder="Jewellery Shop Name" required />
-                  </div>
-                  <div className="input-group">
-                    <label>Mobile Number</label>
-                    <input type="text" value={formData.mobile} onChange={(e) => setFormData({...formData, mobile: e.target.value})} placeholder="10 Digit Number" required />
-                  </div>
-                  <div className="input-group">
-                    <label>Email Address</label>
-                    <input type="email" value={formData.email} onChange={(e) => setFormData({...formData, email: e.target.value})} placeholder="client@name.com" />
-                  </div>
-                  <div className="input-group">
-                    <label>Location / City</label>
-                    <input type="text" value={formData.location} onChange={(e) => setFormData({...formData, location: e.target.value})} placeholder="District/State" />
-                  </div>
-                  <div className="input-group">
-                    <label>Expiry Date</label>
-                    <input type="date" value={formData.expiry} onChange={(e) => setFormData({...formData, expiry: e.target.value})} required />
-                  </div>
+                  <div className="input-group"><label>Email Address</label><input type="email" {...f("email")} placeholder="client@name.com" /></div>
+                  <div className="input-group"><label>Location / Address</label><input type="text" {...f("location")} placeholder="Shop address, city" /></div>
+                  <div className="input-group"><label>Expiry Date *</label><input type="date" min={today()} {...f("expiry")} required /></div>
                 </div>
 
-                {/* Super Admin Credentials Section */}
-                <div style={{ marginTop: '25px', padding: '20px', background: '#f0f8ff', borderRadius: '10px', border: '1px dashed #3498db' }}>
-                  <p style={{ margin: '0 0 15px', fontWeight: 700, color: '#2980b9' }}>🔐 Super Admin Credentials</p>
+                <div className="credentials-box">
+                  <p>🔐 Super Admin Credentials</p>
                   <div className="form-grid">
-                    <div className="input-group">
-                      <label>Username *</label>
-                      <input type="text" value={formData.superAdminUsername} onChange={(e) => setFormData({...formData, superAdminUsername: e.target.value})} placeholder="e.g. owner_lakshman" required />
-                    </div>
-                    <div className="input-group">
-                      <label>Password *</label>
-                      <input type="password" value={formData.superAdminPassword} onChange={(e) => setFormData({...formData, superAdminPassword: e.target.value})} placeholder="Set a strong password" required />
-                    </div>
+                    <div className="input-group"><label>Username *</label><input type="text" {...f("superAdminUsername")} placeholder="e.g. owner_lakshman" required /></div>
+                    <div className="input-group"><label>Password * <small>(min. 8 characters)</small></label><input type="password" minLength={8} {...f("superAdminPassword")} placeholder="Set a strong password" required /></div>
                   </div>
-                  <small style={{ color: '#888' }}>⚠️ Share these credentials with the shop owner. They use this to log in alongside the license key.</small>
+                  <small>⚠️ Share these credentials with the shop owner. They use them to log in alongside the license key.</small>
                 </div>
 
-                <button type="submit" className="gen-btn" style={{ marginTop: '20px' }}>Register &amp; Generate Key</button>
+                <button type="submit" className="gen-btn" disabled={busy}>{busy ? "Creating…" : "Register & Generate Key"}</button>
               </form>
-              {successMsg && <div className="key-reveal">{successMsg}</div>}
+              {successMsg && <div className="key-reveal">{successMsg}<div className="key-note">This key is shown once here — copy it now. You can also see it in View Database.</div></div>}
               {error && <p className="error">{error}</p>}
             </div>
           </section>
-        ) : (
+        )}
+
+        {view === "list" && (
           <section className="list-page">
             <header>
               <h1>License Database</h1>
               <p>Management of all active and expired keys</p>
             </header>
-
+            {error && <p className="error">{error}</p>}
             <div className="table-card">
               <table className="admin-table">
                 <thead>
-                  <tr>
-                    <th>License Key</th>
-                    <th>Business</th>
-                    <th>Mobile</th>
-                    <th>Expiry</th>
-                    <th>Status</th>
-                    <th>Action</th>
-                  </tr>
+                  <tr><th>License Key</th><th>Business</th><th>Mobile</th><th>Expiry</th><th>Status</th><th>Action</th></tr>
                 </thead>
                 <tbody>
-                  {licenses.map(l => {
-                    const isExpired = new Date(l.expiry) < new Date();
-                    return (
-                      <tr key={l.id}>
-                        <td><code className="key-code">{l.key}</code></td>
-                        <td>{l.business} <br/> <small>{l.name}</small></td>
-                        <td>{l.mobile}</td>
-                        <td>{l.expiry}</td>
-                        <td>
-                          <span className={`status-pill ${isExpired ? 'expired' : 'active'}`}>
-                            {isExpired ? 'Expired' : 'Active'}
+                  {licenses.map((l) => (
+                    <tr key={l.id}>
+                      <td><code className="key-code">{l.key || "—"}</code></td>
+                      <td>{l.business} <br /> <small>{l.name}</small></td>
+                      <td>{l.mobile}</td>
+                      <td>
+                        {renewing?.id === l.id ? (
+                          <span className="renew-inline">
+                            <input type="date" min={today()} value={renewing.expiry} onChange={(e) => setRenewing({ ...renewing, expiry: e.target.value })} />
+                            <button className="renew-btn" onClick={renewLicense} disabled={!renewing.expiry}>Save</button>
+                            <button className="plain-btn" onClick={() => setRenewing(null)}>✕</button>
                           </span>
-                        </td>
-                        <td>
-                          {isExpired && (
-                            <button
-                              onClick={() => renewLicense(l.id)}
-                              className="renew-btn"
-                            >
-                              🔄 Renew
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
+                        ) : l.expiry}
+                      </td>
+                      <td><span className={`status-pill ${l.status}`}>{l.status[0].toUpperCase() + l.status.slice(1)}</span></td>
+                      <td className="actions">
+                        <button className="renew-btn" onClick={() => setRenewing({ id: l.id, expiry: "" })}>🔄 Renew</button>
+                        {l.active
+                          ? <button className="plain-btn danger" onClick={() => setActive(l, false)}>Deactivate</button>
+                          : <button className="plain-btn" onClick={() => setActive(l, true)}>Activate</button>}
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
-              {licenses.length === 0 && <p style={{ textAlign: 'center', padding: '20px' }}>No licenses found.</p>}
+              {licenses.length === 0 && <p style={{ textAlign: "center", padding: "20px" }}>No licenses found.</p>}
+            </div>
+          </section>
+        )}
+
+        {view === "requests" && (
+          <section className="list-page">
+            <header>
+              <h1>Mobile Change Requests</h1>
+              <p>Shop owners (Super Admins) who lost access to their registered number</p>
+            </header>
+            {error && <p className="error">{error}</p>}
+            <div className="table-card">
+              <table className="admin-table">
+                <thead><tr><th>Shop</th><th>Requested by</th><th>New mobile</th><th>Requested</th><th>Status</th><th>Action</th></tr></thead>
+                <tbody>
+                  {requests.map((r) => (
+                    <tr key={r.id}>
+                      <td>{r.shopName || "—"}</td>
+                      <td>{r.requestedByName} <br /><small>@{r.requestedByUsername}</small></td>
+                      <td>{r.newMobile}</td>
+                      <td>{r.createdAt ? new Date(r.createdAt).toLocaleString() : "—"}</td>
+                      <td><span className={`status-pill ${r.status === "approved" ? "active" : r.status === "rejected" ? "expired" : "pending"}`}>{r.status}</span></td>
+                      <td className="actions">
+                        {r.status === "pending" && (
+                          <>
+                            <button className="renew-btn ok" onClick={() => decide(r.id, "approved")}>✅ Approve</button>
+                            <button className="plain-btn danger" onClick={() => decide(r.id, "rejected")}>Reject</button>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {requests.length === 0 && <p style={{ textAlign: "center", padding: "20px" }}>No requests.</p>}
             </div>
           </section>
         )}

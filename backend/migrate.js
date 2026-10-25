@@ -1,110 +1,87 @@
 /**
- * 🔄 Migration Script — One-time run
- * Hashes all plain-text passwords with bcrypt
- * Encrypts all plain-text license keys with AES-256
+ * 🔄 Migration script — safe to run more than once.
  *
- * Run with: node migrate.js
+ *  • License keys: adds keyHash + keyEncrypted and REMOVES the plain-text `key` field
+ *  • Passwords: bcrypt-hashes any remaining plain-text passwords
+ *  • Products: upgrades old inventory records (weight / makingCharges) to the new
+ *    piece format (grossWt / netWt / purity / makingType / status)
+ *
+ * Run with: node migrate.js            (dry run — shows what would change)
+ *           node migrate.js --apply    (writes the changes)
  */
-
 require("dotenv").config();
+const path = require("path");
 const admin = require("firebase-admin");
 const bcrypt = require("bcrypt");
-const crypto = require("crypto");
-const serviceAccount = require("./serviceAccountKey.json");
+const { createSecurity, hashKeyForLookup } = require("./lib/security");
 
+const APPLY = process.argv.includes("--apply");
+const security = createSecurity({
+  encryptionSecret: process.env.ENCRYPTION_SECRET,
+  tokenSecret: process.env.TOKEN_SECRET || "x".repeat(32) // tokens aren't used here
+});
+const serviceAccount = require(path.resolve(__dirname, process.env.FIREBASE_SERVICE_ACCOUNT || "serviceAccountKey.json"));
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
+const FieldValue = admin.firestore.FieldValue;
 
-const SALT_ROUNDS = 10;
-const ENC_KEY = process.env.ENCRYPTION_SECRET; // must be exactly 32 chars
-
-if (!ENC_KEY || ENC_KEY.length !== 32) {
-  console.error("❌ ENCRYPTION_SECRET must be exactly 32 characters. Check your .env file.");
-  process.exit(1);
+async function write(ref, data, label) {
+  console.log(`  ${APPLY ? "✏️ " : "🔍 would"} ${label}`);
+  if (APPLY) await ref.update(data);
 }
 
-// ── AES-256-CBC Encrypt ─────────────────────────────────────
-function encryptKey(plainText) {
-  const iv = crypto.randomBytes(16);
-  const cipher = crypto.createCipheriv("aes-256-cbc", Buffer.from(ENC_KEY), iv);
-  let encrypted = cipher.update(plainText);
-  encrypted = Buffer.concat([encrypted, cipher.final()]);
-  return iv.toString("hex") + ":" + encrypted.toString("hex");
-}
-
-// ── SHA-256 Hash (for fast Firestore lookup) ─────────────────
-function hashKeyForLookup(plainText) {
-  return crypto.createHash("sha256").update(plainText).digest("hex");
-}
-
-// ── Check if already bcrypt hashed ───────────────────────────
-function isAlreadyHashed(str) {
-  return typeof str === "string" && str.startsWith("$2b$");
-}
-
-// ── Check if already AES encrypted ───────────────────────────
-function isAlreadyEncrypted(str) {
-  // AES output format: "hexIV:hexCipher"
-  return typeof str === "string" && str.includes(":") && str.length > 50;
-}
-
-// ── Main Migration ────────────────────────────────────────────
 async function migrate() {
-  console.log("🚀 Starting migration...\n");
-  let licenseMigrated = 0;
-  let usersMigrated = 0;
+  console.log(APPLY ? "🚀 Applying migration...\n" : "🔍 Dry run (use --apply to write changes)\n");
+  const counts = { keys: 0, passwords: 0, products: 0 };
 
   const licensesSnap = await db.collection("licenses").get();
-  console.log(`📋 Found ${licensesSnap.size} license(s)\n`);
-
   for (const licenseDoc of licensesSnap.docs) {
     const data = licenseDoc.data();
-    const licenseId = licenseDoc.id;
-    const updates = {};
+    console.log(`📋 License ${licenseDoc.id} (${data.business || "?"})`);
 
-    // ── Migrate License Key ──────────────────────────────────
-    if (data.key && !isAlreadyEncrypted(data.key)) {
-      updates.keyEncrypted = encryptKey(data.key);
-      updates.keyHash      = hashKeyForLookup(data.key);
-      // Keep original key field so admin display still works for now
-      console.log(`  🔑 License [${licenseId}] key "${data.key}" → encrypted + hashed`);
-      licenseMigrated++;
-    } else if (data.key) {
-      console.log(`  ⏭️  License [${licenseId}] key already encrypted — skipped`);
+    if (data.key) {
+      const update = { key: FieldValue.delete() };
+      if (!data.keyHash) update.keyHash = hashKeyForLookup(data.key);
+      if (!data.keyEncrypted) update.keyEncrypted = security.encryptKey(String(data.key).trim().toUpperCase());
+      await write(licenseDoc.ref, update, "license key → hashed + encrypted, plain text removed");
+      counts.keys++;
     }
 
-    if (Object.keys(updates).length > 0) {
-      await db.collection("licenses").doc(licenseId).update(updates);
-    }
-
-    // ── Migrate Users Under This License ────────────────────
-    const usersSnap = await db
-      .collection("licenses").doc(licenseId)
-      .collection("users").get();
-
-    for (const userDoc of usersSnap.docs) {
-      const userData = userDoc.data();
-
-      if (userData.password && !isAlreadyHashed(userData.password)) {
-        const hashedPassword = await bcrypt.hash(userData.password, SALT_ROUNDS);
-        await db
-          .collection("licenses").doc(licenseId)
-          .collection("users").doc(userDoc.id)
-          .update({ password: hashedPassword });
-
-        console.log(`  👤 User @${userData.username} password → bcrypt hashed`);
-        usersMigrated++;
-      } else if (userData.password) {
-        console.log(`  ⏭️  User @${userData.username} already hashed — skipped`);
+    const users = await licenseDoc.ref.collection("users").get();
+    for (const u of users.docs) {
+      const pw = u.data().password;
+      if (pw && !String(pw).startsWith("$2")) {
+        await write(u.ref, { password: await bcrypt.hash(pw, 10) }, `user @${u.data().username} password → bcrypt`);
+        counts.passwords++;
       }
     }
 
-    console.log("");
+    const products = await licenseDoc.ref.collection("products").get();
+    for (const p of products.docs) {
+      const d = p.data();
+      if (d.status && d.grossWt != null) continue;
+      const wt = Number(d.grossWt ?? d.weight) || 0;
+      await write(p.ref, {
+        itemCode: String(d.itemCode || p.id).toUpperCase(),
+        purity: d.purity || "22K",
+        hsn: d.hsn || "7113",
+        huid: d.huid || "",
+        pcs: d.pcs || 1,
+        grossWt: wt,
+        stoneWt: Number(d.stoneWt) || 0,
+        netWt: Number(d.netWt ?? wt) || 0,
+        wastagePct: Number(d.wastagePct) || 0,
+        makingType: d.makingType || "fixed",
+        makingValue: Number(d.makingValue ?? d.makingCharges) || 0,
+        stoneCharges: Number(d.stoneCharges) || 0,
+        status: d.status || "in_stock"
+      }, `product ${d.itemCode || p.id} → new piece format`);
+      counts.products++;
+    }
   }
 
-  console.log("─────────────────────────────────────");
-  console.log(`✅ Done! Licenses encrypted: ${licenseMigrated} | Users hashed: ${usersMigrated}`);
-  console.log("─────────────────────────────────────");
+  console.log("\n─────────────────────────────────────");
+  console.log(`${APPLY ? "✅ Done" : "🔍 Dry run"} — keys: ${counts.keys} | passwords: ${counts.passwords} | products: ${counts.products}`);
   process.exit(0);
 }
 

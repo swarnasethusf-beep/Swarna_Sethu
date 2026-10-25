@@ -1,5 +1,6 @@
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
 const path = require("path");
+const fs = require("fs");
 const { SerialPort } = require("serialport");
 const { ReadlineParser } = require("@serialport/parser-readline");
 
@@ -19,7 +20,7 @@ function createWindow() {
       contextIsolation: true,
       preload: path.join(__dirname, "preload.js")
     },
-    title: "Swarna Raseid Billing",
+    title: "Swarna Sethu Billing",
     icon: path.join(__dirname, "public", "favicon.ico")
   });
 
@@ -171,6 +172,26 @@ function sendCredentials(username, password) {
     mainWindow.webContents.send("esp32:credentials", { username, password });
   }
 }
+
+// ─── Invoice PDF: save the current page (print layout) as an A4 PDF ───────────
+ipcMain.handle("invoice:save-pdf", async (event, fileName) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const safeName = String(fileName || "Invoice").replace(/[\\/:*?"<>|]+/g, "-").slice(0, 100);
+  const { canceled, filePath } = await dialog.showSaveDialog(win, {
+    title: "Save invoice as PDF",
+    defaultPath: path.join(app.getPath("documents"), `${safeName}.pdf`),
+    filters: [{ name: "PDF", extensions: ["pdf"] }]
+  });
+  if (canceled || !filePath) return { canceled: true };
+  const pdf = await event.sender.printToPDF({
+    pageSize: "A4",
+    printBackground: true,
+    margins: { marginType: "custom", top: 0.4, bottom: 0.4, left: 0.4, right: 0.4 }
+  });
+  fs.writeFileSync(filePath, pdf);
+  shell.showItemInFolder(filePath);
+  return { filePath };
+});
 
 // ─── App Lifecycle ─────────────────────────────────────────────────────────────
 app.whenReady().then(createWindow);

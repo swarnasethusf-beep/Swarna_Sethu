@@ -1,0 +1,273 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const bcrypt = require("bcrypt");
+const { createApp } = require("../app");
+const { createSecurity } = require("../lib/security");
+const { financialYear } = require("../lib/billing");
+const { todayIST } = require("../lib/util");
+const { createFakeFirestore } = require("./fakeFirestore");
+
+const sentSms = [];
+let server, base, db;
+
+test.before(async () => {
+  const fake = createFakeFirestore();
+  db = fake.db;
+  const app = createApp({
+    db,
+    deleteField: fake.deleteField,
+    security: createSecurity({ encryptionSecret: "a".repeat(32), tokenSecret: "t".repeat(40) }),
+    config: {
+      corsOrigins: ["http://localhost:3000"],
+      adminUsername: "admin",
+      adminPasswordHash: bcrypt.hashSync("admin-pass-123", 4)
+    },
+    sendSms: async (phone, message) => sentSms.push({ phone, otp: message.match(/\d{6}/)[0] }),
+    fetchGold24k: null
+  });
+  await new Promise((resolve) => { server = app.listen(0, resolve); });
+  base = `http://127.0.0.1:${server.address().port}`;
+});
+test.after(() => server.close());
+
+async function call(method, path, { token, body } = {}) {
+  const res = await fetch(base + path, {
+    method,
+    headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  return { status: res.status, body: await res.json().catch(() => null) };
+}
+
+const nextYear = `${Number(todayIST().slice(0, 4)) + 1}-12-31`;
+const fyShort = financialYear(todayIST()).slice(2);
+const state = {};
+
+test("global admin: login is enforced on the server", async () => {
+  assert.equal((await call("GET", "/admin/licenses")).status, 401);
+  assert.equal((await call("POST", "/admin/login", { body: { username: "admin", password: "admin123" } })).status, 401);
+  const ok = await call("POST", "/admin/login", { body: { username: "admin", password: "admin-pass-123" } });
+  assert.equal(ok.status, 200);
+  state.adminToken = ok.body.token;
+});
+
+test("global admin: issue a license — key stored hashed + encrypted, never in plain text", async () => {
+  const weak = await call("POST", "/admin/licenses", { token: state.adminToken, body: {
+    name: "Lakshman", business: "Sri Gold", mobile: "9876543210", expiry: nextYear,
+    superAdminUsername: "owner", superAdminPassword: "short"
+  } });
+  assert.equal(weak.status, 400);
+
+  const res = await call("POST", "/admin/licenses", { token: state.adminToken, body: {
+    name: "Lakshman", business: "Sri Gold", mobile: "9876543210", location: "Hyderabad", expiry: nextYear,
+    superAdminUsername: "owner", superAdminPassword: "owner-pass-1"
+  } });
+  assert.equal(res.status, 200);
+  assert.match(res.body.key, /^SW-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+  state.key = res.body.key;
+  state.licenseId = res.body.id;
+
+  const stored = db._store.get(`licenses/${state.licenseId}`);
+  assert.equal(stored.key, undefined);
+  assert.ok(stored.keyHash && stored.keyEncrypted);
+  assert.ok(!JSON.stringify(stored).includes(state.key));
+
+  const list = await call("GET", "/admin/licenses", { token: state.adminToken });
+  assert.equal(list.body[0].key, state.key);
+  assert.equal(list.body[0].status, "active");
+});
+
+test("shop login: wrong password rejected, right one returns a token and shop profile", async () => {
+  assert.equal((await call("POST", "/auth/login", { body: { licenseKey: state.key, username: "owner", password: "nope-nope" } })).status, 401);
+  const res = await call("POST", "/auth/login", { body: { licenseKey: state.key.toLowerCase(), username: "owner", password: "owner-pass-1" } });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.user.role, "super_admin");
+  assert.equal(res.body.shop.name, "Sri Gold");
+  state.owner = res.body.token;
+});
+
+test("API rejects unauthenticated and forged requests", async () => {
+  assert.equal((await call("GET", `/products?licenseDocId=${state.licenseId}&role=super_admin`)).status, 401);
+  assert.equal((await call("GET", "/invoices", { token: "abc.def" })).status, 401);
+  const [body] = state.owner.split(".");
+  assert.equal((await call("GET", "/invoices", { token: `${body}.forgedsignature` })).status, 401);
+  assert.equal((await call("GET", "/admin/licenses", { token: state.owner })).status, 401); // shop token ≠ admin token
+});
+
+test("settings: shop profile with GSTIN validation", async () => {
+  const bad = await call("PUT", "/settings", { token: state.owner, body: { shop: { name: "Sri Gold", gstin: "22AAAAA0000A1Z5", stateCode: "36" } } });
+  assert.equal(bad.status, 400); // GSTIN state 22 ≠ Telangana 36
+  const ok = await call("PUT", "/settings", { token: state.owner, body: {
+    shop: { name: "Sri Gold Jewellers", address: "Abids, Hyderabad", gstin: "36ABCDE1234F1Z5", stateCode: "36", invoicePrefix: "SG" },
+    displaySettings: { invoice: true }
+  } });
+  assert.equal(ok.status, 200);
+  const rates = await call("PUT", "/rates", { token: state.owner, body: { "24K": 7000, "22K": 6500, "18K": 5300 } });
+  assert.equal(rates.status, 200);
+});
+
+test("users: super admin creates a billing-only admin; permissions are enforced server-side", async () => {
+  const res = await call("POST", "/users", { token: state.owner, body: {
+    name: "Ravi", username: "ravi", password: "ravi-pass-1", mobile: "9123456780", permissions: { invoice: true }
+  } });
+  assert.equal(res.status, 200);
+  state.raviId = res.body.id;
+  const login = await call("POST", "/auth/login", { body: { licenseKey: state.key, username: "ravi", password: "ravi-pass-1" } });
+  state.ravi = login.body.token;
+  assert.equal((await call("GET", "/staff", { token: state.ravi })).status, 403);
+  assert.equal((await call("GET", "/users", { token: state.ravi })).status, 403);
+  assert.equal((await call("PUT", "/settings", { token: state.ravi, body: { shop: { name: "x" } } })).status, 403);
+  assert.equal((await call("DELETE", `/users/${state.raviId}`, { token: state.ravi })).status, 403);
+});
+
+test("inventory: add piece, unique item code, billing lookup", async () => {
+  const piece = { itemCode: "nk-001", description: "Necklace", purity: "22K", grossWt: 20.5, stoneWt: 0.5, wastagePct: 8, makingType: "per_gram", makingValue: 400, stoneCharges: 1500, huid: "AB12CD" };
+  const res = await call("POST", "/products", { token: state.owner, body: piece });
+  assert.equal(res.status, 200);
+  state.productId = res.body.id;
+  assert.equal((await call("POST", "/products", { token: state.owner, body: piece })).status, 400);
+  const look = await call("GET", "/products/lookup/NK-001", { token: state.ravi });
+  assert.equal(look.status, 200);
+  assert.equal(look.body.netWt, 20);
+});
+
+test("invoice: totals computed on the server, consecutive numbers, stock marked sold", async () => {
+  const body = {
+    mode: "sale",
+    rates: { "24K": 7000, "22K": 6500, "18K": 5300 },
+    customer: { name: "Anitha", mobile: "9988776655" },
+    items: [{ productId: state.productId, itemCode: "NK-001", description: "Necklace", purity: "22K", grossWt: 20.5, stoneWt: 0.5, wastagePct: 8, makingType: "per_gram", makingValue: 400, stoneCharges: 1500 }],
+    oldGold: [{ description: "Old bangle", grossWt: 10, touch: 91.6 }],
+    payments: [{ mode: "UPI", amount: 90277 }],
+    summary: { payable: 1 } // client-sent totals must be ignored
+  };
+  const res = await call("POST", "/invoices", { token: state.ravi, body });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(res.body.invoiceNumber, `SG/${fyShort}/0001`);
+  assert.equal(res.body.summary.payable, 90277);
+  assert.equal(res.body.summary.cgst, 2248.5);
+  assert.equal(res.body.summary.balance, 0);
+  assert.equal(res.body.shop.gstin, "36ABCDE1234F1Z5");
+  state.invoiceId = res.body.id;
+
+  const product = db._store.get(`licenses/${state.licenseId}/products/${state.productId}`);
+  assert.equal(product.status, "sold");
+
+  const again = await call("POST", "/invoices", { token: state.ravi, body });
+  assert.equal(again.status, 409); // piece already sold
+
+  const second = await call("POST", "/invoices", { token: state.owner, body: {
+    mode: "job_work", rates: { "24K": 7000, "22K": 6500 },
+    customer: { name: "Kiran" },
+    items: [{ description: "Haram", purity: "22K", grossWt: 25, makingType: "per_gram", makingValue: 300 }],
+    oldGold: [{ grossWt: 20, touch: 91.6 }],
+    payments: [{ mode: "Cash", amount: 20000 }]
+  } });
+  assert.equal(second.status, 200, JSON.stringify(second.body));
+  assert.equal(second.body.invoiceNumber, `SG/${fyShort}/0002`);
+  assert.equal(second.body.summary.payable, 40897);
+  assert.equal(second.body.summary.balance, 20897);
+
+  const customer = db._store.get(`licenses/${state.licenseId}/customers/9988776655`);
+  assert.equal(customer.name, "Anitha");
+});
+
+test("invoice: compliance errors block saving (PAN above ₹2 lakh)", async () => {
+  const res = await call("POST", "/invoices", { token: state.owner, body: {
+    mode: "sale", rates: { "22K": 6500 }, customer: { name: "Big buyer" },
+    items: [{ description: "Bridal set", purity: "22K", grossWt: 40 }]
+  } });
+  assert.equal(res.status, 400);
+  assert.equal(res.body.details[0].code, "PAN_REQUIRED");
+});
+
+test("invoice list: admins see only their own bills; owner sees all", async () => {
+  const mine = await call("GET", "/invoices", { token: state.ravi });
+  assert.deepEqual(mine.body.invoices.map((i) => i.invoiceNumber), [`SG/${fyShort}/0001`]);
+  const all = await call("GET", "/invoices", { token: state.owner });
+  assert.equal(all.body.invoices.length, 2);
+  assert.equal((await call("GET", `/invoices/${state.invoiceId}`, { token: state.ravi })).status, 200);
+});
+
+test("cancel: owner only, keeps the number, returns stock", async () => {
+  assert.equal((await call("POST", `/invoices/${state.invoiceId}/cancel`, { token: state.ravi, body: { reason: "x" } })).status, 403);
+  const res = await call("POST", `/invoices/${state.invoiceId}/cancel`, { token: state.owner, body: { reason: "Customer returned" } });
+  assert.equal(res.status, 200);
+  const product = db._store.get(`licenses/${state.licenseId}/products/${state.productId}`);
+  assert.equal(product.status, "in_stock");
+
+  const report = await call("GET", "/reports/sales", { token: state.owner });
+  assert.equal(report.body.totals.count, 1);
+  assert.equal(report.body.totals.cancelled, 1);
+  assert.equal(report.body.totals.payable, 40897);
+  assert.equal(report.body.byHsn.length, 2);
+  assert.equal((await call("GET", "/reports/sales", { token: state.ravi })).status, 403);
+});
+
+test("forgot password: OTP to registered mobile, attempt limit, old sessions revoked", async () => {
+  const start = await call("POST", "/auth/forgot/start", { body: { licenseKey: state.key, username: "ravi" } });
+  assert.equal(start.body.maskedMobile, "••••••6780");
+  assert.ok(!JSON.stringify(start.body).includes("9123456780"));
+
+  const sent = await call("POST", "/auth/forgot/send-otp", { body: { licenseKey: state.key, username: "ravi" } });
+  assert.equal(sent.status, 200);
+  const { otp, phone } = sentSms.at(-1);
+  assert.equal(phone, "9123456780");
+
+  const wrong = await call("POST", "/auth/forgot/verify-otp", { body: { sessionId: sent.body.sessionId, otp: otp === "111111" ? "222222" : "111111" } });
+  assert.equal(wrong.status, 401);
+  assert.equal((await call("POST", "/auth/forgot/reset", { body: { sessionId: sent.body.sessionId, newPassword: "new-pass-123" } })).status, 401);
+
+  assert.equal((await call("POST", "/auth/forgot/verify-otp", { body: { sessionId: sent.body.sessionId, otp } })).status, 200);
+  const reset = await call("POST", "/auth/forgot/reset", { body: { sessionId: sent.body.sessionId, newPassword: "new-pass-123" } });
+  assert.equal(reset.status, 200);
+
+  assert.equal((await call("GET", "/auth/me", { token: state.ravi })).status, 401); // old token revoked
+  const login = await call("POST", "/auth/login", { body: { licenseKey: state.key, username: "ravi", password: "new-pass-123" } });
+  assert.equal(login.status, 200);
+  state.ravi = login.body.token;
+});
+
+test("mobile change: admin request approved by the shop owner", async () => {
+  const req = await call("POST", "/auth/forgot/request-mobile-change", { body: { licenseKey: state.key, username: "ravi", newMobile: "9000000001" } });
+  assert.equal(req.status, 200);
+  assert.equal((await call("GET", `/auth/forgot/request-status/${req.body.requestId}`)).body.status, "pending");
+  const pending = await call("GET", "/requests", { token: state.owner });
+  assert.equal(pending.body.length, 1);
+  assert.equal((await call("GET", "/admin/requests", { token: state.adminToken })).body.length, 0);
+  await call("POST", `/requests/${req.body.requestId}/decision`, { token: state.owner, body: { action: "approved" } });
+  assert.equal((await call("GET", `/auth/forgot/request-status/${req.body.requestId}`)).body.status, "approved");
+  assert.equal(db._store.get(`licenses/${state.licenseId}/users/${state.raviId}`).mobile, "9000000001");
+});
+
+test("legacy records: plain-text license key and password are upgraded on login", async () => {
+  await db.collection("licenses").doc("legacy").set({ key: "SW-OLD123", business: "Old Shop", active: true, expiry: nextYear });
+  await db.collection("licenses").doc("legacy").collection("users").doc("u1").set({ username: "old", password: "plain-pass", role: "super_admin", name: "Old" });
+  const res = await call("POST", "/auth/login", { body: { licenseKey: "sw-old123", username: "old", password: "plain-pass" } });
+  assert.equal(res.status, 200);
+  const lic = db._store.get("licenses/legacy");
+  assert.equal(lic.key, undefined);
+  assert.ok(lic.keyHash);
+  assert.ok(db._store.get("licenses/legacy/users/u1").password.startsWith("$2"));
+});
+
+test("expired or deactivated licenses are blocked, including existing sessions", async () => {
+  await call("POST", `/admin/licenses/${state.licenseId}/status`, { token: state.adminToken, body: { active: false } });
+  assert.equal((await call("GET", "/auth/me", { token: state.owner })).status, 403);
+  assert.equal((await call("POST", "/auth/login", { body: { licenseKey: state.key, username: "owner", password: "owner-pass-1" } })).status, 403);
+  await call("POST", `/admin/licenses/${state.licenseId}/status`, { token: state.adminToken, body: { active: true } });
+  assert.equal((await call("GET", "/auth/me", { token: state.owner })).status, 200);
+});
+
+test("login is rate limited", async () => {
+  let last;
+  for (let i = 0; i < 9; i++) last = await call("POST", "/auth/login", { body: { licenseKey: state.key, username: "owner", password: `wrong-${i}` } });
+  assert.equal(last.status, 429);
+});
+
+test("CORS: unknown browser origins are refused", async () => {
+  const res = await fetch(`${base}/health`, { headers: { origin: "https://evil.example" } });
+  assert.equal(res.status, 403);
+  const ok = await fetch(`${base}/health`, { headers: { origin: "http://localhost:3000" } });
+  assert.equal(ok.headers.get("access-control-allow-origin"), "http://localhost:3000");
+});

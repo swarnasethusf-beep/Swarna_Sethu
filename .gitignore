@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Secrets — never commit these (use the *.example files as templates)
+.env
+.env.*
+!.env.example
+serviceAccountKey.json
+*serviceAccount*.json
+
+# Build output
+build/
+dist/
+
+# Logs / OS
+npm-debug.log*
+*.log
+.DS_Store
+Thumbs.db

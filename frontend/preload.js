@@ -21,3 +21,11 @@ contextBridge.exposeInMainWorld("esp32", {
     ipcRenderer.removeAllListeners("esp32:status");
   }
 });
+
+/**
+ * 🖨️ Desktop-only helpers. In a normal browser `window.desktop` is undefined and the
+ * app falls back to the browser's print dialog ("Save as PDF").
+ */
+contextBridge.exposeInMainWorld("desktop", {
+  saveInvoicePdf: (fileName) => ipcRenderer.invoke("invoice:save-pdf", fileName)
+});

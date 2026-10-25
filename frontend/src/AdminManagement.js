@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from "react";
-import axios from "axios";
+import api, { errMsg } from "./api";
 
 /**
  * 👑 Admin Management — Visible only to Super Admin
- * Create admins, assign module permissions, view/delete existing admins
+ * Create admins, assign module permissions, view/edit/delete existing admins,
+ * approve their mobile-number change requests.
  */
-function AdminManagement({ licenseDocId }) {
+function AdminManagement() {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(false);
   const [pendingRequests, setPendingRequests] = useState([]);
@@ -35,9 +36,7 @@ function AdminManagement({ licenseDocId }) {
 
   const fetchPendingRequests = async () => {
     try {
-      const res = await axios.get("http://localhost:5000/pending-requests", {
-        params: { licenseDocId }
-      });
+      const res = await api.get("/requests");
       // Only show pending ones
       setPendingRequests(res.data.filter(r => r.status === "pending"));
     } catch (err) {
@@ -47,20 +46,16 @@ function AdminManagement({ licenseDocId }) {
 
   const handleApproveRequest = async (requestId, action) => {
     try {
-      await axios.post("http://localhost:5000/approve-request", {
-        licenseDocId, requestId, action
-      });
+      await api.post(`/requests/${requestId}/decision`, { action });
       fetchPendingRequests();
-    } catch {
-      alert("Failed to process request.");
+    } catch (err) {
+      alert(errMsg(err, "Failed to process request."));
     }
   };
 
   const fetchUsers = async () => {
     try {
-      const res = await axios.get("http://localhost:5000/users", {
-        params: { licenseDocId }
-      });
+      const res = await api.get("/users");
       setUsers(res.data);
     } catch (err) {
       console.error("Failed to fetch users:", err);
@@ -76,15 +71,18 @@ function AdminManagement({ licenseDocId }) {
 
   const handleCreate = async (e) => {
     e.preventDefault();
-    if (!form.mobile || form.mobile.replace(/\D/g, "").length !== 10) {
+    if (!/^[6-9]\d{9}$/.test(form.mobile)) {
       setMsg({ text: "Please enter a valid 10-digit mobile number.", type: "error" });
+      return;
+    }
+    if (form.password.length < 8) {
+      setMsg({ text: "Password must be at least 8 characters.", type: "error" });
       return;
     }
     setLoading(true);
     setMsg({ text: "", type: "" });
     try {
-      await axios.post("http://localhost:5000/add-user", {
-        licenseDocId,
+      await api.post("/users", {
         name: form.name,
         username: form.username,
         password: form.password,
@@ -95,7 +93,7 @@ function AdminManagement({ licenseDocId }) {
       setForm({ name: "", username: "", password: "", mobile: "", permissions: { invoice: false, inventory: false, staff: false, reports: false } });
       fetchUsers();
     } catch (err) {
-      setMsg({ text: err.response?.data?.error || "Failed to create admin.", type: "error" });
+      setMsg({ text: errMsg(err, "Failed to create admin."), type: "error" });
     } finally {
       setLoading(false);
     }
@@ -104,12 +102,22 @@ function AdminManagement({ licenseDocId }) {
   const handleDelete = async (userId, userName) => {
     if (!window.confirm(`Remove admin "${userName}"? This cannot be undone.`)) return;
     try {
-      await axios.delete("http://localhost:5000/delete-user", {
-        data: { licenseDocId, userId }
-      });
+      await api.delete(`/users/${userId}`);
       fetchUsers();
-    } catch {
-      alert("Failed to delete user.");
+    } catch (err) {
+      alert(errMsg(err, "Failed to delete user."));
+    }
+  };
+
+  // Click a permission badge on an existing admin to switch it on/off
+  const toggleUserPermission = async (u, key) => {
+    const permissions = { ...u.permissions, [key]: !u.permissions?.[key] };
+    setUsers((list) => list.map((x) => (x.id === u.id ? { ...x, permissions } : x)));
+    try {
+      await api.patch(`/users/${u.id}`, { permissions });
+    } catch (err) {
+      alert(errMsg(err, "Failed to update permissions."));
+      fetchUsers();
     }
   };
 
@@ -160,7 +168,8 @@ function AdminManagement({ licenseDocId }) {
               <label>Password *</label>
               <input
                 type="password"
-                placeholder="Set a password"
+                placeholder="At least 8 characters"
+                minLength={8}
                 value={form.password}
                 onChange={e => setForm({ ...form, password: e.target.value })}
                 required
@@ -295,7 +304,7 @@ function AdminManagement({ licenseDocId }) {
                   </div>
                   <div>
                     <div style={{ fontWeight: 700 }}>{u.name}</div>
-                    <div style={{ fontSize: "0.8rem", color: "#888" }}>@{u.username}</div>
+                    <div style={{ fontSize: "0.8rem", color: "#888" }}>@{u.username}{u.mobile ? ` · ••••${u.mobile.slice(-4)}` : ""}</div>
                   </div>
                   <button
                     onClick={() => handleDelete(u.id, u.name)}
@@ -314,9 +323,11 @@ function AdminManagement({ licenseDocId }) {
                   {Object.entries(MODULE_LABELS).map(([key, { icon, label }]) => (
                     <span
                       key={key}
+                      title="Click to switch on/off"
+                      onClick={() => toggleUserPermission(u, key)}
                       style={{
                         padding: "4px 10px", borderRadius: "20px", fontSize: "0.75rem",
-                        fontWeight: 600,
+                        fontWeight: 600, cursor: "pointer", userSelect: "none",
                         background: u.permissions?.[key] ? "#eafaf1" : "#f0f0f0",
                         color: u.permissions?.[key] ? "#27ae60" : "#bbb",
                         border: `1px solid ${u.permissions?.[key] ? "#a9dfbf" : "#ddd"}`
