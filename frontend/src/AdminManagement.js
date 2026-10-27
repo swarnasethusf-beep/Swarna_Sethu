@@ -125,8 +125,8 @@ function AdminManagement() {
 
   const MODULE_LABELS = {
     invoice:    { icon: "📜", label: "Invoice" },
-    inventory:  { icon: "📦", label: "Inventory" },
-    barcode:    { icon: "🏷️", label: "Barcode" },
+    inventory:  { icon: "📦", label: "Inventory & Barcodes" },
+    barcode:    { icon: "🏷️", label: "Add stock & labels only" },
     staff:      { icon: "👥", label: "Staff" },
     reports:    { icon: "📊", label: "Reports" },
     workorders: { icon: "🔨", label: "Work Orders" }

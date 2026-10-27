@@ -1,23 +1,52 @@
 const express = require("express");
 const bcrypt = require("bcrypt");
-const { HttpError, bad, str, number, mobile10, todayIST, docOut, serialize } = require("../lib/util");
-const { PURITIES, STATES, GSTIN_RE } = require("../lib/billing");
+const { HttpError, bad, str, mobile10, todayIST, docOut, serialize } = require("../lib/util");
+const { STATES, GSTIN_RE } = require("../lib/billing");
+const { readRates, effectiveRates, loadMarketRates } = require("../lib/rates");
+const { readPrintSettings, readLogo, brandingOut } = require("../lib/branding");
 const { shopProfile, validatePassword, SALT_ROUNDS } = require("./auth");
 
 const { MODULES } = require("../lib/perms");
-const LIVE_RATE_CACHE_MS = 5 * 60 * 1000;
 
 module.exports = function shopRoutes(deps) {
-  const { db, mw, can, forgetUser, forgetLicense } = deps;
+  const { db, mw, can, forgetUser, forgetLicense, imageStore } = deps;
   const router = express.Router();
+  const branding = (lic) => brandingOut(lic, { logoUploads: !!imageStore });
 
   // ── Settings: shop profile (printed on invoices) + display settings ─────
   router.get("/settings", mw.auth, mw.office, async (req, res) => {
     const lic = (await req.ctx.licenseRef.get()).data();
     res.send({
       shop: shopProfile(lic),
-      displaySettings: { invoice: false, dashboard: false, inventory: false, staff: false, ...(lic.displaySettings || {}) }
+      displaySettings: { invoice: false, dashboard: false, inventory: false, staff: false, ...(lic.displaySettings || {}) },
+      branding: branding(lic)
     });
+  });
+
+  // ── Branding: invoice print layout + shop logo (see lib/branding.js) ────
+  router.put("/settings/print", mw.auth, mw.superAdmin, async (req, res) => {
+    const printSettings = readPrintSettings(req.body);
+    await req.ctx.licenseRef.update({ printSettings });
+    const lic = (await req.ctx.licenseRef.get()).data();
+    res.send(branding(lic));
+  });
+
+  router.post("/settings/logo", mw.auth, mw.superAdmin, async (req, res) => {
+    if (!imageStore) throw new HttpError(503, "Logo upload isn't available yet — it needs Firebase Storage (Blaze plan). Ask your provider to enable it.");
+    const logo = readLogo(req.body.dataUrl);
+    const lic = (await req.ctx.licenseRef.get()).data();
+    const path = `logos/${req.ctx.licenseDocId}/logo-${Date.now()}.${logo.ext}`;  // new name each time: no stale cached copies
+    const logoUrl = await imageStore.save(path, logo.buffer, logo.contentType);
+    await req.ctx.licenseRef.update({ branding: { logoUrl, logoPath: path, logoUpdatedAt: new Date() } });
+    if (lic.branding?.logoPath) imageStore.remove(lic.branding.logoPath).catch((err) => console.error("Old logo cleanup failed:", err.message));
+    res.send(branding({ ...lic, branding: { logoUrl } }));
+  });
+
+  router.delete("/settings/logo", mw.auth, mw.superAdmin, async (req, res) => {
+    const lic = (await req.ctx.licenseRef.get()).data();
+    await req.ctx.licenseRef.update({ branding: deps.deleteField() });
+    if (imageStore && lic.branding?.logoPath) await imageStore.remove(lic.branding.logoPath).catch((err) => console.error("Logo delete failed:", err.message));
+    res.send(branding({ ...lic, branding: null }));
   });
 
   router.put("/settings", mw.auth, mw.superAdmin, async (req, res) => {
@@ -49,39 +78,29 @@ module.exports = function shopRoutes(deps) {
     res.send({ shop, displaySettings });
   });
 
-  // ── Daily metal rates (₹ per gram) ──────────────────────────────────────
+  // ── Daily metal rates (₹ per gram) — see lib/rates.js ───────────────────
   router.get("/rates", mw.auth, mw.office, async (req, res) => {
-    const lic = (await req.ctx.licenseRef.get()).data();
-    res.send(serialize(lic.rates || {}));
+    const [lic, market] = await Promise.all([req.ctx.licenseRef.get().then((d) => d.data()), loadMarketRates(db)]);
+    res.send(serialize(effectiveRates(lic.rates, market) || {}));
+  });
+
+  // "Fetch live rate": the market rate the provider published, read from Firestore
+  router.get("/rates/market", mw.auth, mw.office, async (req, res) => {
+    const market = await loadMarketRates(db);
+    if (!market) return res.send({ available: false, message: "Your provider hasn't published a market rate yet. Enter today's rates manually." });
+    res.send(serialize({ available: true, ...market }));
   });
 
   router.put("/rates", mw.auth, mw.perm("invoice"), async (req, res) => {
-    const rates = {};
-    for (const k of Object.keys(PURITIES)) rates[k] = number(req.body[k], { min: 0, max: 1e6, field: `${k} rate` });
-    if (!rates["24K"] || !rates["22K"]) throw bad("24K and 22K rates are required.");
-    const saved = { ...rates, date: todayIST(), updatedAt: new Date(), updatedByName: req.ctx.name };
+    const saved = { ...readRates(req.body), date: todayIST(), updatedAt: new Date(), updatedByName: req.ctx.name };
     await req.ctx.licenseRef.update({ rates: saved });
-    res.send(serialize(saved));
+    res.send(serialize({ ...saved, source: "shop" }));
   });
 
-  let liveCache = null;
-  router.get("/rates/live", mw.auth, mw.office, async (req, res) => {
-    if (!deps.fetchGold24k) return res.send({ available: false, message: "Live rates are not configured (set GOLDAPI_KEY)." });
-    if (!liveCache || liveCache.expires < Date.now()) {
-      try {
-        const g24 = await deps.fetchGold24k();
-        const r = (f) => Math.round(g24 * f * 100) / 100;
-        liveCache = {
-          expires: Date.now() + LIVE_RATE_CACHE_MS,
-          data: { available: true, source: "goldapi.io (spot, excl. duties/margin)", fetchedAt: new Date().toISOString(),
-            "24K": r(1), "22K": r(PURITIES["22K"].fineness / PURITIES["24K"].fineness), "18K": r(PURITIES["18K"].fineness / PURITIES["24K"].fineness), "14K": r(PURITIES["14K"].fineness / PURITIES["24K"].fineness) }
-        };
-      } catch (err) {
-        console.error("Live gold rate error:", err.message);
-        return res.send({ available: false, message: "Could not fetch live rates right now. Enter today's rates manually." });
-      }
-    }
-    res.send(liveCache.data);
+  // Drop the shop's own rates so the published market rate applies again
+  router.delete("/rates", mw.auth, mw.perm("invoice"), async (req, res) => {
+    await req.ctx.licenseRef.update({ rates: deps.deleteField() });
+    res.send(serialize(effectiveRates(null, await loadMarketRates(db)) || {}));
   });
 
   // ── Users (Super Admin manages Admins) ──────────────────────────────────
@@ -169,8 +188,8 @@ module.exports = function shopRoutes(deps) {
     const monthStart = today.slice(0, 8) + "01";
     const out = { today, rates: null, invoices: null, stock: null };
 
-    const lic = (await ctx.licenseRef.get()).data();
-    out.rates = serialize(lic.rates || null);
+    const [lic, market] = await Promise.all([ctx.licenseRef.get().then((d) => d.data()), loadMarketRates(db)]);
+    out.rates = serialize(effectiveRates(lic.rates, market));
 
     if (can(ctx, "invoice") || can(ctx, "reports")) {
       const snap = await ctx.licenseRef.collection("invoices").where("date", ">=", monthStart).get();

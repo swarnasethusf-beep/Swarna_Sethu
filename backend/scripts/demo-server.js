@@ -30,6 +30,9 @@ async function seed(db, security) {
     rates: { "24K": 7650, "22K": 7015, "18K": 5740, "14K": 4475, date: todayIST(), updatedAt: new Date(), updatedByName: "Lakshman Rao" },
     createdAt: new Date()
   });
+  const market = { "24K": 7700, "22K": 7058, "18K": 5775, "14K": 4497, date: todayIST(), updatedAt: new Date(Date.now() - 60 * 60 * 1000), updatedByName: "Provider" };
+  await db.collection("platform").doc("goldRate").set(market);
+  await db.collection("goldRateHistory").doc(market.date).set(market);
   const hash = (pw) => bcrypt.hashSync(pw, 8);
   await lic.collection("users").doc("owner").set({
     name: "Lakshman Rao", username: "owner", password: hash("owner1234"), mobile: "9876543210",
@@ -72,7 +75,12 @@ async function seed(db, security) {
       adminPasswordHash: bcrypt.hashSync("admin-demo-123", 8)
     },
     sendSms: null, // OTPs print to this console
-    fetchGold24k: null
+    fetchGold24k: null,
+    // No Firebase Storage here: logos are kept as data URLs in memory so the feature can be tried
+    imageStore: {
+      save: async (path, buffer, contentType) => `data:${contentType};base64,${buffer.toString("base64")}`,
+      remove: async () => {}
+    }
   });
   app.listen(PORT, () => {
     console.log(`\n🧪 DEMO server (in-memory data) on http://localhost:${PORT}\n`);

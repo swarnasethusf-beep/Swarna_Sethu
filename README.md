@@ -48,6 +48,16 @@ for the live preview; the server recomputes every invoice on save and ignores to
 - CGST+SGST within the shop's state, IGST otherwise. PAN required above ₹2 lakh; cash of ₹2 lakh or more is blocked.
 - Invoice numbers: `PREFIX/26-27/0001`, consecutive per financial year (Firestore transaction). Cancelled invoices keep their number.
 
+## Gold rate and shop logos
+
+- **Gold rate** — the admin portal's *Gold Rate* page publishes the day's ₹/g rates to Firestore (`platform/goldRate`,
+  one record per day in `goldRateHistory`). Every shop bills with it; a shop can save its own rate on *Today's Rates*,
+  and whichever was saved last applies. *Fill from live spot price* in the admin portal needs `GOLDAPI_KEY`.
+- **Logos** — the shop owner uploads a PNG/JPG logo in *Settings → Logo & invoice print layout*. It replaces the
+  Swarna Sethu logo in the side menu and can be printed on invoices. Files go to Firebase Storage, which needs the
+  **Blaze** plan: create the Storage bucket, then set `FIREBASE_STORAGE_BUCKET` on the backend. Until then the upload
+  button is switched off; the other print settings (colour, title, tagline, footer…) work on the free Spark plan.
+
 ## Deploy on Vercel
 
 One GitHub repo → **three Vercel projects** (Vercel → Add New → Project → import this repo, once per row;
@@ -61,7 +71,7 @@ set **Root Directory** as shown). Do the backend first because the websites need
 
 Backend variables: `ENCRYPTION_SECRET`, `TOKEN_SECRET`, `ADMIN_USERNAME`, `ADMIN_PASSWORD_HASH` (paste just the hash starting with `$2b$` —
 **without** the single quotes that the local `.env` file uses), `FIREBASE_SERVICE_ACCOUNT_JSON` (base64 of the key file), `CORS_ORIGINS`, and optionally
-`FAST2SMS_API_KEY` and `GOLDAPI_KEY`.
+`FAST2SMS_API_KEY`, `GOLDAPI_KEY` and `FIREBASE_STORAGE_BUCKET`.
 
 Order: deploy `backend` → copy its URL → deploy `frontend` and `admin_frontend` with `REACT_APP_API_URL` set to it →
 put the two website URLs in the backend's `CORS_ORIGINS` → redeploy the backend. `REACT_APP_*` values are baked in at build time,
