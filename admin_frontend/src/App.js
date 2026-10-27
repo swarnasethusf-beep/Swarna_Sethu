@@ -13,6 +13,9 @@ function errMsg(err, fallback = "Something went wrong.") {
 }
 
 const today = () => new Date().toISOString().slice(0, 10);
+const PURITIES = { "24K": 999, "22K": 916, "18K": 750, "14K": 585 };   // fineness ‰
+const EMPTY_RATES = { "24K": "", "22K": "", "18K": "", "14K": "" };
+const when = (iso) => (iso ? new Date(iso).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "—");
 const EMPTY_FORM = {
   name: "", business: "", mobile: "", email: "", location: "", expiry: "",
   superAdminUsername: "", superAdminPassword: ""
@@ -28,7 +31,7 @@ function App() {
   });
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [view, setView] = useState("create"); // create | list | requests
+  const [view, setView] = useState("create"); // create | list | requests | rates
   const [formData, setFormData] = useState(EMPTY_FORM);
   const [licenses, setLicenses] = useState([]);
   const [requests, setRequests] = useState([]);
@@ -36,6 +39,9 @@ function App() {
   const [error, setError] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
   const [busy, setBusy] = useState(false);
+  const [goldRate, setGoldRate] = useState(null);           // { current, history, liveAvailable }
+  const [rateForm, setRateForm] = useState(EMPTY_RATES);
+  const [rateMsg, setRateMsg] = useState({ text: "", type: "" });
 
   const setToken = (t) => {
     setTokenState(t);
@@ -73,12 +79,61 @@ function App() {
     }
   }, []);
 
+  const fetchGoldRate = useCallback(async () => {
+    try {
+      const res = await api.get("/admin/gold-rate");
+      setGoldRate(res.data);
+      if (res.data.current) setRateForm(Object.fromEntries(Object.keys(PURITIES).map((k) => [k, res.data.current[k] || ""])));
+    } catch (err) {
+      setError(errMsg(err));
+    }
+  }, []);
+
   useEffect(() => {
     if (!token) return;
     setError("");
     if (view === "list") fetchLicenses();
     if (view === "requests") fetchRequests();
-  }, [token, view, fetchLicenses, fetchRequests]);
+    if (view === "rates") fetchGoldRate();
+  }, [token, view, fetchLicenses, fetchRequests, fetchGoldRate]);
+
+  // ── Market gold rate: published to every licensed shop ──────────────────
+  const deriveRates = () => {
+    const g24 = parseFloat(rateForm["24K"]);
+    if (!g24) return;
+    setRateForm({ ...rateForm, ...Object.fromEntries(["22K", "18K", "14K"].map((k) => [k, Math.round((g24 * PURITIES[k]) / PURITIES["24K"])])) });
+  };
+
+  const fetchSpot = async () => {
+    setBusy(true); setRateMsg({ text: "", type: "" });
+    try {
+      const { data } = await api.get("/admin/gold-rate/live");
+      if (!data.available) setRateMsg({ text: data.message, type: "error" });
+      else {
+        setRateForm(Object.fromEntries(Object.keys(PURITIES).map((k) => [k, Math.round(data[k])])));
+        setRateMsg({ text: `Filled from the international spot price (${data.source}). Spot excludes import duty, GST and margin — adjust before publishing.`, type: "info" });
+      }
+    } catch (err) {
+      setRateMsg({ text: errMsg(err), type: "error" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const publishRate = async (e) => {
+    e.preventDefault();
+    if (!window.confirm(`Publish 24K ₹${rateForm["24K"]}/g · 22K ₹${rateForm["22K"]}/g to every licensed shop?`)) return;
+    setBusy(true); setRateMsg({ text: "", type: "" });
+    try {
+      await api.put("/admin/gold-rate", rateForm);
+      setRateMsg({ text: "✅ Published. Every shop now bills with this rate unless it sets its own.", type: "success" });
+      fetchGoldRate();
+    } catch (err) {
+      setRateMsg({ text: "❌ " + errMsg(err), type: "error" });
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -164,6 +219,7 @@ function App() {
         <nav>
           <div className={view === "create" ? "active" : ""} onClick={() => setView("create")}>📝 Issue License</div>
           <div className={view === "list" ? "active" : ""} onClick={() => setView("list")}>📋 View Database</div>
+          <div className={view === "rates" ? "active" : ""} onClick={() => setView("rates")}>🪙 Gold Rate</div>
           <div className={view === "requests" ? "active" : ""} onClick={() => setView("requests")}>
             🔔 Mobile Requests {pendingCount > 0 && <span className="count-badge">{pendingCount}</span>}
           </div>
@@ -250,6 +306,59 @@ function App() {
               </table>
               {licenses.length === 0 && <p style={{ textAlign: "center", padding: "20px" }}>No licenses found.</p>}
             </div>
+          </section>
+        )}
+
+        {view === "rates" && (
+          <section className="form-page">
+            <header>
+              <h1>Today's Gold Rate</h1>
+              <p>The market rate (₹ per gram) every licensed shop bills with. A shop can still set its own rate — whichever was saved last applies.</p>
+            </header>
+            {error && <p className="error">{error}</p>}
+            <div className="card">
+              <p style={{ marginTop: 0 }}>
+                <strong>Currently published:</strong>{" "}
+                {goldRate?.current
+                  ? <>{Object.keys(PURITIES).filter((k) => goldRate.current[k]).map((k) => `${k} ₹${goldRate.current[k]}`).join(" · ")} <small>({when(goldRate.current.updatedAt)})</small></>
+                  : "nothing yet"}
+              </p>
+              <form onSubmit={publishRate} className="admin-form">
+                <div className="form-grid">
+                  {Object.keys(PURITIES).map((k) => (
+                    <div key={k} className="input-group">
+                      <label>{k} (₹/g){(k === "24K" || k === "22K") && " *"}</label>
+                      <input type="number" min="0" step="0.01" value={rateForm[k]} required={k === "24K" || k === "22K"} onChange={(e) => setRateForm({ ...rateForm, [k]: e.target.value })} />
+                    </div>
+                  ))}
+                </div>
+                <div className="actions" style={{ display: "flex", gap: 10, flexWrap: "wrap", margin: "6px 0 14px" }}>
+                  <button type="button" className="plain-btn" onClick={deriveRates}>Derive 22K / 18K / 14K from 24K</button>
+                  <button type="button" className="plain-btn" onClick={fetchSpot} disabled={busy || !goldRate?.liveAvailable} title={goldRate?.liveAvailable ? "" : "Set GOLDAPI_KEY on the backend"}>
+                    🔄 Fill from live spot price
+                  </button>
+                </div>
+                <button type="submit" className="gen-btn" disabled={busy}>{busy ? "Working…" : "📢 Publish to all shops"}</button>
+              </form>
+              {rateMsg.text && <p className={rateMsg.type === "error" ? "error" : "key-note"}>{rateMsg.text}</p>}
+            </div>
+
+            {goldRate?.history?.length > 0 && (
+              <div className="table-card" style={{ marginTop: 20 }}>
+                <table className="admin-table">
+                  <thead><tr><th>Date</th>{Object.keys(PURITIES).map((k) => <th key={k}>{k} ₹/g</th>)}<th>Published</th></tr></thead>
+                  <tbody>
+                    {goldRate.history.map((h) => (
+                      <tr key={h.date}>
+                        <td>{h.date}</td>
+                        {Object.keys(PURITIES).map((k) => <td key={k}>{h[k] || "—"}</td>)}
+                        <td>{when(h.updatedAt)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </section>
         )}
 

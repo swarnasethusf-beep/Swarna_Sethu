@@ -2,7 +2,10 @@ const express = require("express");
 const bcrypt = require("bcrypt");
 const { hashKeyForLookup, generateLicenseKey, safeEqual } = require("../lib/security");
 const { HttpError, bad, str, mobile10, isoDate, todayIST, docOut, serialize } = require("../lib/util");
+const { marketRateRef, rateHistory, readRates, deriveFrom24k, loadMarketRates } = require("../lib/rates");
 const { validatePassword, SALT_ROUNDS } = require("./auth");
+
+const LIVE_RATE_CACHE_MS = 5 * 60 * 1000;
 
 /**
  * 👑 Global admin (license issuer) — protected by ADMIN_USERNAME / ADMIN_PASSWORD_HASH.
@@ -104,6 +107,39 @@ module.exports = function adminRoutes(deps) {
     await ref.update({ active: req.body.active });
     forgetLicense(req.params.id);
     res.send({ success: true });
+  });
+
+  // ── Market gold rate for every licensed shop (see lib/rates.js) ─────────
+  router.get("/admin/gold-rate", async (req, res) => {
+    const [current, history] = await Promise.all([
+      loadMarketRates(db),
+      rateHistory(db).orderBy("date", "desc").limit(14).get()
+    ]);
+    res.send(serialize({ current, history: history.docs.map((d) => d.data()), liveAvailable: !!deps.fetchGold24k }));
+  });
+
+  router.put("/admin/gold-rate", async (req, res) => {
+    const date = todayIST();
+    const saved = { ...readRates(req.body), date, updatedAt: new Date(), updatedByName: "Provider" };
+    await marketRateRef(db).set(saved);
+    await rateHistory(db).doc(date).set(saved);   // last rate of each day
+    res.send(serialize(saved));
+  });
+
+  // International spot price from GoldAPI — only fills the admin form, nothing is saved
+  let liveCache = null;
+  router.get("/admin/gold-rate/live", async (req, res) => {
+    if (!deps.fetchGold24k) return res.send({ available: false, message: "Live spot price is not configured (set GOLDAPI_KEY on the backend)." });
+    if (!liveCache || liveCache.expires < Date.now()) {
+      try {
+        const rates = deriveFrom24k(await deps.fetchGold24k());
+        liveCache = { expires: Date.now() + LIVE_RATE_CACHE_MS, data: { available: true, source: "goldapi.io (spot, excl. duties/margin)", fetchedAt: new Date().toISOString(), ...rates } };
+      } catch (err) {
+        console.error("Live gold rate error:", err.message);
+        return res.send({ available: false, message: "Could not fetch the live spot price right now." });
+      }
+    }
+    res.send(liveCache.data);
   });
 
   // ── Super Admin mobile-change requests ──────────────────────────────────

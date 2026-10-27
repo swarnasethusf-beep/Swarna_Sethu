@@ -185,6 +185,24 @@
 .pi-table tfoot td { font-weight: 700; background: #fafafa; }
 .pi-paytable { margin-top: 10px; min-width: 0; }
 .pi-foot .pi-terms { flex: 1; }
+/* Print layout chosen in Settings → Logo & invoice print layout (--pi-accent, pi-size-*) */
+.print-invoice { --pi-accent: #111; }
+.print-invoice h2, .pi-doc { color: var(--pi-accent); }
+.pi-head { border-bottom-color: var(--pi-accent); }
+.pi-totals tr.grand td { border-color: var(--pi-accent); }
+.pi-shop { display: flex; gap: 14px; align-items: flex-start; }
+.pi-logo { max-height: 72px; max-width: 140px; object-fit: contain; }
+.pi-logo-center { text-align: center; margin-bottom: 8px; }
+.pi-logo-center img { max-height: 80px; max-width: 260px; object-fit: contain; }
+.pi-tagline { font-style: italic; color: #555; }
+.pi-footnote { margin-top: 12px; font-size: 10.5px; color: #444; white-space: pre-line; border-top: 1px dashed #bbb; padding-top: 6px; }
+.print-invoice.pi-size-compact { font-size: 11px; }
+.print-invoice.pi-size-large { font-size: 13.5px; }
+.print-invoice.pi-size-large h2 { font-size: 23px; }
+.branding-logo { display: flex; gap: 16px; align-items: flex-start; }
+.branding-logo-box { width: 150px; height: 90px; border: 1px dashed var(--line); border-radius: 8px; display: flex; align-items: center; justify-content: center; background: #fafafa; flex-shrink: 0; }
+.branding-logo-box img { max-width: 136px; max-height: 76px; object-fit: contain; }
+.btn.disabled { opacity: 0.55; pointer-events: none; }
 .watermark { position: absolute; top: 40%; left: 50%; transform: translate(-50%, -50%) rotate(-25deg); font-size: 90px; font-weight: 900; color: rgba(231, 76, 60, 0.15); pointer-events: none; }
 
 @media print {
@@ -194,6 +212,8 @@
   .dashboard-container { display: block; }
   .main-view { padding: 0; overflow: visible; }
   .print-invoice { border: none; padding: 0; max-width: none; font-size: 11px; }
+  .print-invoice.pi-size-compact { font-size: 10px; }
+  .print-invoice.pi-size-large { font-size: 12.5px; }
   .print-invoice, .print-invoice * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .pi-table { font-size: 9.5px; }
   .pi-table th, .pi-table td { padding: 3px 4px; }

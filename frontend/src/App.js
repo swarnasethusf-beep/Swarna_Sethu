@@ -5,7 +5,6 @@ import logo from "./Swarna_Sethu_logo.png";
 import Login from "./Login";
 import Dashboard from "./Dashboard";
 import Inventory from "./Inventory";
-import BarcodeLabels from "./BarcodeLabels";
 import InvoiceList from "./InvoiceList";
 import NewInvoice from "./NewInvoice";
 import InvoiceView from "./InvoiceView";
@@ -83,8 +82,7 @@ function App() {
     { key: "dashboard", label: "📊 Dashboard", show: true },
     { key: "invoices", label: "📜 Invoices", show: can("invoice") || can("reports") },
     { key: "rates", label: "🪙 Today's Rates", show: can("invoice") },
-    { key: "inventory", label: "📦 Inventory", show: can("inventory") },
-    { key: "barcodes", label: "🏷️ Barcode Generator", show: can("inventory") || can("barcode") },
+    { key: "inventory", label: "📦 Inventory & Barcodes", show: can("inventory") || can("barcode") },
     { key: "customers", label: "🧑‍🤝‍🧑 Customers", show: can("invoice") || can("reports") },
     { key: "reports", label: "📈 Reports", show: can("reports") },
     { key: "staff", label: "👥 Staff", show: can("staff") },
@@ -114,7 +112,7 @@ function App() {
   return (
     <div className="dashboard-container">
       <aside className="side-nav no-print">
-        <div className="nav-logo"><img src={logo} alt="Swarna Sethu" /></div>
+        <div className="nav-logo"><img src={session.branding?.logoUrl || logo} alt={session.shop.name || "Swarna Sethu"} /></div>
         <div className="nav-shop">{session.shop.name || session.license.business}</div>
         <div className="nav-user">
           {user.name}
@@ -167,6 +165,7 @@ function App() {
             id={invoiceView.id}
             invoiceData={invoiceView.invoiceData}
             autoAction={invoiceView.action}
+            branding={session.branding}
             onAutoActionDone={clearInvoiceAction}
             canBill={can("invoice")}
             onSettle={() => setInvoiceView({ mode: "settle", id: invoiceView.id, invoiceData: null, isSecret: false })}
@@ -177,8 +176,14 @@ function App() {
         )}
 
         {current === "rates" && <Rates />}
-        {current === "inventory" && <Inventory userRole={user.role} showCreatedBy={session.displaySettings.inventory && isOwner} />}
-        {current === "barcodes" && <BarcodeLabels shopName={session.shop.name || session.license.business} />}
+        {current === "inventory" && (
+          <Inventory
+            userRole={user.role}
+            canEdit={can("inventory")}
+            shopName={session.shop.name || session.license.business}
+            showCreatedBy={session.displaySettings.inventory && isOwner}
+          />
+        )}
         {current === "customers" && <Customers />}
         {current === "reports" && <Reports onOpenInvoice={openInvoice} />}
         {current === "staff" && <StaffManagement userRole={user.role} showCreatedBy={session.displaySettings.staff && isOwner} />}

@@ -16,6 +16,7 @@ const CONTEXT_CACHE_MS = 30 * 1000;
  *   config: { corsOrigins[], adminUsername, adminPasswordHash },
  *   sendSms(phone, message) → Promise,  (null → dev mode: OTP printed to console)
  *   fetchGold24k() → Promise<number ₹/g> (null → live rates unavailable)
+ *   imageStore: { save(path, buffer, contentType) → Promise<url>, remove(path) } (null → logo upload off)
  * }
  */
 function createApp(deps) {

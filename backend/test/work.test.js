@@ -77,7 +77,7 @@ test("goldsmith login works, has no module permissions, and is locked out of eve
   t.ramu = (await login("ramu", "gold-pass-2")).body.token;
 
   const forbidden = [
-    ["GET", "/dashboard"], ["GET", "/rates"], ["GET", "/rates/live"], ["GET", "/settings"], ["PUT", "/settings"],
+    ["GET", "/dashboard"], ["GET", "/rates"], ["GET", "/rates/market"], ["GET", "/settings"], ["PUT", "/settings"], ["PUT", "/settings/print"], ["POST", "/settings/logo"],
     ["GET", "/invoices"], ["POST", "/invoices"], ["GET", "/reports/sales"], ["GET", "/customers"],
     ["GET", "/products"], ["POST", "/products"], ["GET", "/products/by-code/X"], ["GET", "/products/lookup/X"],
     ["GET", "/staff"], ["GET", "/staff/options"], ["POST", "/staff"], ["GET", "/users"], ["POST", "/users"],

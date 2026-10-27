@@ -8,6 +8,7 @@ const { todayIST } = require("../lib/util");
 const { createFakeFirestore } = require("./fakeFirestore");
 
 const sentSms = [];
+const savedImages = new Map();
 let server, base, db;
 
 test.before(async () => {
@@ -23,7 +24,11 @@ test.before(async () => {
       adminPasswordHash: bcrypt.hashSync("admin-pass-123", 4)
     },
     sendSms: async (phone, message) => sentSms.push({ phone, otp: message.match(/\d{6}/)[0] }),
-    fetchGold24k: null
+    fetchGold24k: null,
+    imageStore: {
+      save: async (path, buffer) => { savedImages.set(path, buffer); return `https://images.test/${path}`; },
+      remove: async (path) => { savedImages.delete(path); }
+    }
   });
   await new Promise((resolve) => { server = app.listen(0, resolve); });
   base = `http://127.0.0.1:${server.address().port}`;
@@ -104,6 +109,69 @@ test("settings: shop profile with GSTIN validation", async () => {
   assert.equal(ok.status, 200);
   const rates = await call("PUT", "/rates", { token: state.owner, body: { "24K": 7000, "22K": 6500, "18K": 5300 } });
   assert.equal(rates.status, 200);
+});
+
+test("gold rate: the provider's market rate reaches shops; a shop can override it and go back", async () => {
+  assert.equal((await call("GET", "/rates", { token: state.owner })).body.source, "shop");
+  assert.equal((await call("GET", "/rates/market", { token: state.owner })).body.available, false);
+  assert.equal((await call("PUT", "/admin/gold-rate", { token: state.owner, body: { "24K": 7700, "22K": 7058 } })).status, 401);
+  assert.equal((await call("PUT", "/admin/gold-rate", { token: state.adminToken, body: { "24K": 7700 } })).status, 400);
+
+  const pub = await call("PUT", "/admin/gold-rate", { token: state.adminToken, body: { "24K": 7700, "22K": 7058, "18K": 5775 } });
+  assert.equal(pub.status, 200);
+  const admin = await call("GET", "/admin/gold-rate", { token: state.adminToken });
+  assert.equal(admin.body.current["24K"], 7700);
+  assert.equal(admin.body.history.length, 1);
+
+  // newer market rate wins over the shop's earlier one
+  let r = await call("GET", "/rates", { token: state.owner });
+  assert.equal(r.body.source, "market");
+  assert.equal(r.body["22K"], 7058);
+  assert.equal((await call("GET", "/rates/market", { token: state.owner })).body["24K"], 7700);
+  assert.equal((await call("GET", "/dashboard", { token: state.owner })).body.rates.source, "market");
+
+  // the shop changes it for itself…
+  await call("PUT", "/rates", { token: state.owner, body: { "24K": 7000, "22K": 6500, "18K": 5300 } });
+  r = await call("GET", "/rates", { token: state.owner });
+  assert.equal(r.body.source, "shop");
+  assert.equal(r.body["22K"], 6500);
+  // …and can go back to the market rate
+  r = await call("DELETE", "/rates", { token: state.owner });
+  assert.equal(r.body.source, "market");
+  assert.equal((await call("GET", "/rates", { token: state.owner })).body["24K"], 7700);
+});
+
+test("branding: print layout is validated; the logo goes to the image store and shows in the session", async () => {
+  assert.equal((await call("PUT", "/settings/print", { token: state.owner, body: { accentColor: "red" } })).status, 400);
+  const saved = await call("PUT", "/settings/print", { token: state.owner, body: {
+    accentColor: "#8B6914", fontSize: "large", logoPosition: "center", tagline: "BIS hallmarked", invoiceTitle: "tax invoice cum bill", showRates: false, fontSizeX: "x"
+  } });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.print.accentColor, "#8b6914");
+  assert.equal(saved.body.print.invoiceTitle, "TAX INVOICE CUM BILL");
+  assert.equal(saved.body.print.showRates, false);
+  assert.equal(saved.body.print.showLogo, true);            // untouched settings keep their defaults
+  assert.equal(saved.body.logoUploads, true);
+
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(40)]);
+  assert.equal((await call("POST", "/settings/logo", { token: state.owner, body: { dataUrl: "data:image/png;base64," + Buffer.from("not an image").toString("base64") } })).status, 400);
+  assert.equal((await call("POST", "/settings/logo", { token: state.owner, body: { dataUrl: "data:image/gif;base64,R0lGOD" } })).status, 400);
+  const up = await call("POST", "/settings/logo", { token: state.owner, body: { dataUrl: "data:image/png;base64," + png.toString("base64") } });
+  assert.equal(up.status, 200);
+  assert.ok(up.body.logoUrl.startsWith(`https://images.test/logos/${state.licenseId}/logo-`) && up.body.logoUrl.endsWith(".png"));
+  assert.equal(savedImages.size, 1);
+
+  const me = await call("GET", "/auth/me", { token: state.owner });
+  assert.equal(me.body.branding.logoUrl, up.body.logoUrl);
+  assert.equal(me.body.branding.print.fontSize, "large");
+
+  const again = await call("POST", "/settings/logo", { token: state.owner, body: { dataUrl: "data:image/png;base64," + png.toString("base64") } });
+  assert.notEqual(again.body.logoUrl, up.body.logoUrl);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(savedImages.size, 1);                         // the old file is removed
+
+  assert.equal((await call("DELETE", "/settings/logo", { token: state.owner })).body.logoUrl, "");
+  assert.equal(savedImages.size, 0);
 });
 
 test("users: super admin creates a billing-only admin; permissions are enforced server-side", async () => {

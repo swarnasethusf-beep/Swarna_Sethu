@@ -3,6 +3,7 @@ import api, { errMsg } from "./api";
 import { amountInWords, STATES, PAYMENT_MODES } from "./shared/billing";
 import { inr, displayDate } from "./format";
 import { printInvoice, saveInvoicePdf, isDesktop } from "./printing";
+import { InvoiceHeader, PRINT_DEFAULTS } from "./BrandingSettings";
 
 const stateName = (code) => STATES.find((s) => s.code === code)?.name || "";
 // Plain amounts inside the wide tables (the ₹ is in the column heading) so all columns fit on A4
@@ -15,7 +16,7 @@ const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString("en-IN", { dateStyl
  * PDF carries every detail shown on the printed invoice.
  * `autoAction` ("print" | "pdf") runs once the invoice has loaded (used by the list's quick buttons).
  */
-function InvoiceView({ id, invoiceData, canCancel, canBill, onSettle, onBack, onNew, autoAction, onAutoActionDone }) {
+function InvoiceView({ id, invoiceData, canCancel, canBill, onSettle, onBack, onNew, autoAction, onAutoActionDone, branding }) {
   const [inv, setInv] = useState(invoiceData || null);
   const [error, setError] = useState("");
   const [cancelling, setCancelling] = useState(false);
@@ -90,6 +91,7 @@ function InvoiceView({ id, invoiceData, canCancel, canBill, onSettle, onBack, on
   const legacy = !inv.summary;
   const s = inv.summary || {};
   const shop = inv.shop || {};
+  const print = { ...PRINT_DEFAULTS, ...branding?.print };   // the shop's current print layout (Settings)
   const cust = inv.customer || { name: inv.customerName, mobile: inv.customerContact, address: inv.customerAddress };
   const cancelled = inv.status === "cancelled";
   const jobWork = inv.mode === "job_work";
@@ -170,20 +172,16 @@ function InvoiceView({ id, invoiceData, canCancel, canBill, onSettle, onBack, on
         </div>
       )}
 
-      <div className={`print-invoice ${cancelled ? "cancelled" : ""}`}>
+      <div className={`print-invoice pi-size-${print.fontSize} ${cancelled ? "cancelled" : ""}`} style={{ "--pi-accent": print.accentColor }}>
         {cancelled && <div className="watermark">CANCELLED</div>}
 
-        <div className="pi-head">
-          <div>
-            <h2>{shop.name || "—"}</h2>
-            {shop.address && <div>{shop.address}</div>}
-            {(shop.phone || shop.email) && <div>{[shop.phone && `Ph: ${shop.phone}`, shop.email].filter(Boolean).join(" · ")}</div>}
-            {shop.gstin && <div><strong>GSTIN:</strong> {shop.gstin}</div>}
-            {shop.stateCode && <div>State: {stateName(shop.stateCode)} ({shop.stateCode})</div>}
-          </div>
-          <div className="pi-title">
-            <div className="pi-doc">{isSecret ? "ESTIMATE / RETAIL INVOICE" : orderStage ? "JOB WORK ORDER RECEIPT" : openJob ? "JOB WORK ORDER — PROVISIONAL" : (jobWork ? "TAX INVOICE — JOB WORK" : "TAX INVOICE")}</div>
-            <div className="pi-copy">Original for recipient</div>
+        <InvoiceHeader
+          shop={shop}
+          print={print}
+          logoUrl={branding?.logoUrl}
+          stateName={stateName}
+          title={isSecret ? "ESTIMATE / RETAIL INVOICE" : orderStage ? "JOB WORK ORDER RECEIPT" : openJob ? "JOB WORK ORDER — PROVISIONAL" : (jobWork ? "TAX INVOICE — JOB WORK" : print.invoiceTitle || "TAX INVOICE")}
+          meta={
             <table className="pi-meta">
               <tbody>
                 <tr><td>Invoice No.</td><td><strong>{inv.invoiceNumber}</strong></td></tr>
@@ -194,8 +192,8 @@ function InvoiceView({ id, invoiceData, canCancel, canBill, onSettle, onBack, on
                 {inv.assignedStaffName && <tr><td>Goldsmith</td><td>{inv.assignedStaffName}</td></tr>}
               </tbody>
             </table>
-          </div>
-        </div>
+          }
+        />
 
         <div className="pi-party">
           <div><strong>Bill to:</strong> {cust.name || "—"}</div>
@@ -218,7 +216,7 @@ function InvoiceView({ id, invoiceData, canCancel, canBill, onSettle, onBack, on
             the final tax invoice (same number) is issued when the finished piece is delivered. Advance received: {inr(s.paid)}.
           </div>
         )}
-        {!legacy && !orderStage && (
+        {!legacy && !orderStage && print.showRates && (
           <div className="pi-rates">
             <span>
               <strong>Rates applied (₹/g):</strong>{" "}
@@ -288,8 +286,8 @@ function InvoiceView({ id, invoiceData, canCancel, canBill, onSettle, onBack, on
                     <td>{i + 1}</td>
                     <td className="left">
                       {it.description}
-                      {it.itemCode && <div className="sub">Code: {it.itemCode}</div>}
-                      {it.huid && <div className="sub">HUID: {it.huid}</div>}
+                      {print.showItemCodes && it.itemCode && <div className="sub">Code: {it.itemCode}</div>}
+                      {print.showItemCodes && it.huid && <div className="sub">HUID: {it.huid}</div>}
                     </td>
                     <td>{it.hsn}</td><td>{it.purity}</td><td>{it.pcs}</td>
                     <td>{it.grossWt.toFixed(3)}</td><td>{it.stoneWt.toFixed(3)}</td><td>{it.netWt.toFixed(3)}</td>
@@ -385,15 +383,18 @@ function InvoiceView({ id, invoiceData, canCancel, canBill, onSettle, onBack, on
 
         <div className="pi-foot">
           <div className="pi-terms">{shop.terms || "Goods once sold will be exchanged as per shop policy. Subject to local jurisdiction."}</div>
-          <div className="pi-sign">
-            <div>&nbsp;</div>
-            <div className="sign-line">Customer signature</div>
-          </div>
+          {print.showCustomerSignature && (
+            <div className="pi-sign">
+              <div>&nbsp;</div>
+              <div className="sign-line">Customer signature</div>
+            </div>
+          )}
           <div className="pi-sign">
             <div>For {shop.name}</div>
-            <div className="sign-line">Authorised signatory</div>
+            <div className="sign-line">{print.signatoryLabel}</div>
           </div>
         </div>
+        {print.footerNote && <div className="pi-footnote">{print.footerNote}</div>}
         <div className="pi-system">Computer-generated invoice · Printed {fmtTime(new Date().toISOString())}</div>
       </div>
 

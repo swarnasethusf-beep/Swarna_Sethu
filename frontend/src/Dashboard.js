@@ -97,7 +97,7 @@ function Dashboard({ session, can, onNewInvoice, onOpenInvoice, onGo, onJobWork 
           </div>
         )}
         <div className="table-card">
-          <h3 className="table-title">Rates (₹/g){rates?.date ? ` · ${displayDate(rates.date)}` : ""}</h3>
+          <h3 className="table-title">Rates (₹/g){rates?.date ? ` · ${displayDate(rates.date)}` : ""}{rates?.source === "market" ? " · market rate" : ""}</h3>
           {rates ? (
             <table className="admin-table">
               <tbody>

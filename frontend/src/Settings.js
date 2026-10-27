@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import api, { errMsg, setToken } from "./api";
 import { STATES } from "./shared/billing";
+import BrandingSettings from "./BrandingSettings";
 
 const MODULES = [
   { key: "dashboard", icon: "📊", label: "Dashboard", desc: "Show 'Created By' info on the dashboard overview" },
@@ -10,8 +11,8 @@ const MODULES = [
 ];
 
 /**
- * ⚙️ Settings — shop profile (printed on invoices) and display settings for the
- * Super Admin; password change for everyone.
+ * ⚙️ Settings — shop profile (printed on invoices), logo + print layout and display settings
+ * for the Super Admin; password change for everyone.
  */
 function Settings({ isOwner, session, onSessionChange }) {
   const [shop, setShop] = useState(session.shop);
@@ -96,6 +97,8 @@ function Settings({ isOwner, session, onSessionChange }) {
           {msg.text && <div className={`alert ${msg.type}`}>{msg.text}</div>}
         </form>
       )}
+
+      {isOwner && <BrandingSettings session={session} onSessionChange={onSessionChange} />}
 
       <form className="card section narrow" onSubmit={changePassword}>
         <h3>🔒 Change my password</h3>

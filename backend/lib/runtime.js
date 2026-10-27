@@ -4,6 +4,7 @@
  * Throws an Error with a readable message when the configuration is incomplete.
  */
 const path = require("path");
+const crypto = require("crypto");
 const admin = require("firebase-admin");
 const axios = require("axios");
 const { createApp } = require("../app");
@@ -44,6 +45,27 @@ function cleanEnvValue(value) {
   return quoted ? v.slice(1, -1) : v;
 }
 
+/**
+ * Saves images in a Firebase Storage bucket and returns a Firebase download URL. The URL carries a
+ * random download token, so it works without making the bucket public or changing Storage rules.
+ */
+function createImageStore(bucket) {
+  return {
+    async save(filePath, buffer, contentType) {
+      const token = crypto.randomUUID();
+      await bucket.file(filePath).save(buffer, {
+        resumable: false,
+        contentType,
+        metadata: { cacheControl: "public, max-age=31536000", metadata: { firebaseStorageDownloadTokens: token } }
+      });
+      return `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(filePath)}?alt=media&token=${token}`;
+    },
+    async remove(filePath) {
+      await bucket.file(filePath).delete({ ignoreNotFound: true });
+    }
+  };
+}
+
 function createRuntime(env = process.env) {
   const security = createSecurity({ encryptionSecret: env.ENCRYPTION_SECRET, tokenSecret: env.TOKEN_SECRET });
 
@@ -80,6 +102,11 @@ function createRuntime(env = process.env) {
       }
     : null;
 
+  // Shop logos (Firebase Storage). Optional: Storage needs the Firebase Blaze plan — until
+  // FIREBASE_STORAGE_BUCKET is set, logo upload is switched off in the app.
+  const bucketName = cleanEnvValue(env.FIREBASE_STORAGE_BUCKET).replace(/^gs:\/\//, "");
+  const imageStore = bucketName ? createImageStore(admin.storage().bucket(bucketName)) : null;
+
   const config = {
     corsOrigins: (env.CORS_ORIGINS || "http://localhost:3000,http://localhost:3001,null")
       .split(",").map((s) => s.trim().replace(/\/+$/, "")).filter(Boolean),
@@ -92,7 +119,7 @@ function createRuntime(env = process.env) {
   if (!config.adminUsername || !config.adminPasswordHash)
     console.warn("⚠️  ADMIN_USERNAME / ADMIN_PASSWORD_HASH not set — the license admin portal login is disabled.");
 
-  const app = createApp({ db, security, config, sendSms, fetchGold24k, deleteField: () => admin.firestore.FieldValue.delete() });
+  const app = createApp({ db, security, config, sendSms, fetchGold24k, imageStore, deleteField: () => admin.firestore.FieldValue.delete() });
   return { app, config };
 }
 

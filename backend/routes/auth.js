@@ -3,6 +3,7 @@ const bcrypt = require("bcrypt");
 const { hashKeyForLookup, normalizeLicenseKey, generateOtp, safeEqual } = require("../lib/security");
 const { HttpError, bad, str, mobile10, maskMobile, serialize } = require("../lib/util");
 const { permissionsFor } = require("../lib/perms");
+const { brandingOut } = require("../lib/branding");
 
 const SALT_ROUNDS = 10;
 const MIN_PASSWORD = 8;
@@ -26,7 +27,7 @@ function shopProfile(lic) {
   };
 }
 
-function sessionPayload(ctx, lic) {
+function sessionPayload(ctx, lic, { logoUploads = false } = {}) {
   return {
     user: {
       id: ctx.userId,
@@ -37,7 +38,8 @@ function sessionPayload(ctx, lic) {
     },
     license: { id: ctx.licenseDocId, business: lic.business || "", expiry: lic.expiry },
     shop: shopProfile(lic),
-    displaySettings: { invoice: false, dashboard: false, inventory: false, staff: false, ...(lic.displaySettings || {}) }
+    displaySettings: { invoice: false, dashboard: false, inventory: false, staff: false, ...(lic.displaySettings || {}) },
+    branding: brandingOut(lic, { logoUploads })
   };
 }
 
@@ -114,12 +116,12 @@ module.exports = function authRoutes(deps) {
       licenseDocId: licDoc.id, userId: userDoc.id, name: user.name, username: user.username, role: user.role,
       permissions: permissionsFor(user.role, user.permissions)
     };
-    res.send({ token, ...sessionPayload(ctx, lic) });
+    res.send({ token, ...sessionPayload(ctx, lic, { logoUploads: !!deps.imageStore }) });
   });
 
   router.get("/auth/me", mw.auth, async (req, res) => {
     const lic = (await req.ctx.licenseRef.get()).data();
-    res.send(serialize(sessionPayload(req.ctx, lic)));
+    res.send(serialize(sessionPayload(req.ctx, lic, { logoUploads: !!deps.imageStore })));
   });
 
   router.post("/auth/change-password", mw.auth, async (req, res) => {
